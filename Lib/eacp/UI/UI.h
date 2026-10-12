@@ -5,6 +5,7 @@
 #include "Component/KeyEvent.h"
 #include "Component/MouseEvent.h"
 #include "DragAndDrop/DragAndDrop.h"
+#include "DragAndDrop/FileDropTarget.h"
 #include "Graphics/Graphics.h"
 #include "Host/ComponentHost.h"
 #include "Render/ClipMask.h"
@@ -27,4 +28,5 @@
 #include "Widgets/PopupMenu.h"
 #include "Widgets/Tabs.h"
 #include "Widgets/TouchScroller.h"
+#include "Widgets/Viewport.h"
 #include "Widgets/Widgets.h"

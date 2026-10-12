@@ -106,6 +106,21 @@ bool toMetalFormat(CVPixelBufferRef pixelBuffer, MTLPixelFormat& out)
             return false;
     }
 }
+
+bool canGenerateMipsOnDevice(TextureFormat format)
+{
+    switch (format)
+    {
+        case TextureFormat::RGBA8Unorm:
+        case TextureFormat::BGRA8Unorm:
+        case TextureFormat::R8Unorm:
+        case TextureFormat::RG8Unorm:
+        case TextureFormat::RGBA16Float:
+            return true;
+        default:
+            return false;
+    }
+}
 } // namespace
 
 struct Texture::Native
@@ -141,12 +156,13 @@ struct Texture::Native
             samples = descriptor.sampleCount;
         }
 
-        // Refused here rather than at the bind, so a format D3D12 cannot take a
-        // typed store to fails the same way on both backends instead of working
-        // on one of them. Nothing is created, so the texture is invalid rather
-        // than a kernel output that quietly does nothing. See
-        // supportsComputeWrite.
-        if (computeWrite && !supportsComputeWrite(descriptor.format))
+        // Refused here rather than at the bind, by the same question a caller
+        // can ask first: a format outside the guaranteed set is written only
+        // where the device says it can be, which is why R8Unorm is taken here
+        // and BGRA8Unorm is refused on every backend. Nothing is created, so the
+        // texture is invalid rather than a kernel output that quietly does
+        // nothing. See Device::supportsComputeWrite.
+        if (computeWrite && !deviceToUse.supportsComputeWrite(descriptor.format))
             return;
 
         // A cube's faces are square and there are six of them, so a rectangle or
@@ -210,6 +226,7 @@ struct Texture::Native
                  && canBuildMipChain(format))
         {
             levels = mipLevelCount(width, height);
+            deviceChain = descriptor.mipmapsOnDevice && canGenerateMipsOnDevice(format);
         }
 
         // Two descriptors for one texture, and the only difference is the shape:
@@ -442,10 +459,33 @@ struct Texture::Native
 
             if (suppliedChain)
                 uploadSuppliedChain(face, facePixels);
-            else if (levels > 1)
+            else if (levels > 1 && !deviceChain)
                 uploadChain(face, facePixels, stride);
             else
                 replaceSlice(face, 0, width, height, facePixels, stride);
+        }
+
+        if (levels > 1 && deviceChain)
+            generateLevelsOnDevice();
+    }
+
+    void generateLevelsOnDevice()
+    {
+        auto queue = (__bridge id<MTLCommandQueue>) device->nativeQueue();
+
+        if (queue == nil)
+            return;
+
+        @autoreleasepool
+        {
+            auto commandBuffer = [queue commandBuffer];
+            auto blit = [commandBuffer blitCommandEncoder];
+
+            [blit generateMipmapsForTexture:(id<MTLTexture>) texture.get()];
+            [blit endEncoding];
+            [commandBuffer commit];
+
+            device->trackSubmittedWork((__bridge void*) commandBuffer);
         }
     }
 
@@ -684,6 +724,7 @@ struct Texture::Native
     // level 0, which changes where each level's bytes come from and nothing
     // else. See TextureDescriptor::mipLevels.
     bool suppliedChain = false;
+    bool deviceChain = false;
 
     bool renderTarget = false;
     bool computeWrite = false;
