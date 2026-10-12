@@ -5,6 +5,7 @@
 
 #include "../Device/Device.h"
 #include "MipChain.h"
+#include "TextureShape.h"
 
 #include <eacp/Core/ObjC/CFRef.h>
 #include <eacp/Core/ObjC/ObjC.h>
@@ -43,6 +44,24 @@ MTLPixelFormat toMetalBlockFormat(TextureFormat format)
                 return MTLPixelFormatBC3_RGBA;
             case TextureFormat::BC7RGBA:
                 return MTLPixelFormatBC7_RGBAUnorm;
+            case TextureFormat::BC1RGBASrgb:
+                return MTLPixelFormatBC1_RGBA_sRGB;
+            case TextureFormat::BC2RGBASrgb:
+                return MTLPixelFormatBC2_RGBA_sRGB;
+            case TextureFormat::BC3RGBASrgb:
+                return MTLPixelFormatBC3_RGBA_sRGB;
+            case TextureFormat::BC7RGBASrgb:
+                return MTLPixelFormatBC7_RGBAUnorm_sRGB;
+            case TextureFormat::BC4RUnorm:
+                return MTLPixelFormatBC4_RUnorm;
+            case TextureFormat::BC4RSnorm:
+                return MTLPixelFormatBC4_RSnorm;
+            case TextureFormat::BC5RGUnorm:
+                return MTLPixelFormatBC5_RGUnorm;
+            case TextureFormat::BC5RGSnorm:
+                return MTLPixelFormatBC5_RGSnorm;
+            case TextureFormat::BC6HRGBUfloat:
+                return MTLPixelFormatBC6H_RGBUfloat;
 
             case TextureFormat::RGBA8Unorm:
             case TextureFormat::BGRA8Unorm:
@@ -51,6 +70,35 @@ MTLPixelFormat toMetalBlockFormat(TextureFormat format)
             case TextureFormat::RGBA16Float:
             case TextureFormat::RGBA32Float:
             case TextureFormat::R32Float:
+            case TextureFormat::R16Float:
+            case TextureFormat::RG16Float:
+            case TextureFormat::RG32Float:
+            case TextureFormat::R16Unorm:
+            case TextureFormat::R32Uint:
+            case TextureFormat::RGBA8UnormSrgb:
+            case TextureFormat::BGRA8UnormSrgb:
+            case TextureFormat::RG16Unorm:
+            case TextureFormat::RGBA16Unorm:
+            case TextureFormat::RGB10A2Unorm:
+            case TextureFormat::RG11B10Float:
+            case TextureFormat::RGB9E5Float:
+            case TextureFormat::R8Uint:
+            case TextureFormat::RG8Uint:
+            case TextureFormat::RGBA8Uint:
+            case TextureFormat::R16Uint:
+            case TextureFormat::RG16Uint:
+            case TextureFormat::RGBA16Uint:
+            case TextureFormat::RG32Uint:
+            case TextureFormat::RGBA32Uint:
+            case TextureFormat::R8Sint:
+            case TextureFormat::RG8Sint:
+            case TextureFormat::RGBA8Sint:
+            case TextureFormat::R16Sint:
+            case TextureFormat::RG16Sint:
+            case TextureFormat::RGBA16Sint:
+            case TextureFormat::R32Sint:
+            case TextureFormat::RG32Sint:
+            case TextureFormat::RGBA32Sint:
                 break;
         }
     }
@@ -79,11 +127,78 @@ MTLPixelFormat toMetalFormat(TextureFormat format)
             return MTLPixelFormatRGBA32Float;
         case TextureFormat::R32Float:
             return MTLPixelFormatR32Float;
+        case TextureFormat::R16Float:
+            return MTLPixelFormatR16Float;
+        case TextureFormat::RG16Float:
+            return MTLPixelFormatRG16Float;
+        case TextureFormat::RG32Float:
+            return MTLPixelFormatRG32Float;
+        case TextureFormat::R16Unorm:
+            return MTLPixelFormatR16Unorm;
+        case TextureFormat::R32Uint:
+            return MTLPixelFormatR32Uint;
+        case TextureFormat::RGBA8UnormSrgb:
+            return MTLPixelFormatRGBA8Unorm_sRGB;
+        case TextureFormat::BGRA8UnormSrgb:
+            return MTLPixelFormatBGRA8Unorm_sRGB;
+        case TextureFormat::RG16Unorm:
+            return MTLPixelFormatRG16Unorm;
+        case TextureFormat::RGBA16Unorm:
+            return MTLPixelFormatRGBA16Unorm;
+        case TextureFormat::RGB10A2Unorm:
+            return MTLPixelFormatRGB10A2Unorm;
+        case TextureFormat::RG11B10Float:
+            return MTLPixelFormatRG11B10Float;
+        case TextureFormat::RGB9E5Float:
+            return MTLPixelFormatRGB9E5Float;
+        case TextureFormat::R8Uint:
+            return MTLPixelFormatR8Uint;
+        case TextureFormat::RG8Uint:
+            return MTLPixelFormatRG8Uint;
+        case TextureFormat::RGBA8Uint:
+            return MTLPixelFormatRGBA8Uint;
+        case TextureFormat::R16Uint:
+            return MTLPixelFormatR16Uint;
+        case TextureFormat::RG16Uint:
+            return MTLPixelFormatRG16Uint;
+        case TextureFormat::RGBA16Uint:
+            return MTLPixelFormatRGBA16Uint;
+        case TextureFormat::RG32Uint:
+            return MTLPixelFormatRG32Uint;
+        case TextureFormat::RGBA32Uint:
+            return MTLPixelFormatRGBA32Uint;
+        case TextureFormat::R8Sint:
+            return MTLPixelFormatR8Sint;
+        case TextureFormat::RG8Sint:
+            return MTLPixelFormatRG8Sint;
+        case TextureFormat::RGBA8Sint:
+            return MTLPixelFormatRGBA8Sint;
+        case TextureFormat::R16Sint:
+            return MTLPixelFormatR16Sint;
+        case TextureFormat::RG16Sint:
+            return MTLPixelFormatRG16Sint;
+        case TextureFormat::RGBA16Sint:
+            return MTLPixelFormatRGBA16Sint;
+        case TextureFormat::R32Sint:
+            return MTLPixelFormatR32Sint;
+        case TextureFormat::RG32Sint:
+            return MTLPixelFormatRG32Sint;
+        case TextureFormat::RGBA32Sint:
+            return MTLPixelFormatRGBA32Sint;
 
         case TextureFormat::BC1RGBA:
         case TextureFormat::BC2RGBA:
         case TextureFormat::BC3RGBA:
         case TextureFormat::BC7RGBA:
+        case TextureFormat::BC1RGBASrgb:
+        case TextureFormat::BC2RGBASrgb:
+        case TextureFormat::BC3RGBASrgb:
+        case TextureFormat::BC7RGBASrgb:
+        case TextureFormat::BC4RUnorm:
+        case TextureFormat::BC4RSnorm:
+        case TextureFormat::BC5RGUnorm:
+        case TextureFormat::BC5RGSnorm:
+        case TextureFormat::BC6HRGBUfloat:
             return toMetalBlockFormat(format);
     }
 
@@ -107,6 +222,48 @@ bool toMetalFormat(CVPixelBufferRef pixelBuffer, MTLPixelFormat& out)
     }
 }
 
+MTLTextureType toMetalTextureType(TextureType kind)
+{
+    switch (kind)
+    {
+        case TextureType::TwoD:
+            return MTLTextureType2D;
+        case TextureType::Cube:
+            return MTLTextureTypeCube;
+        case TextureType::TwoDArray:
+            return MTLTextureType2DArray;
+        case TextureType::CubeArray:
+            return MTLTextureTypeCubeArray;
+        case TextureType::ThreeD:
+            return MTLTextureType3D;
+    }
+
+    return MTLTextureType2D;
+}
+
+MTLTextureDescriptor* describeShape(const TextureShape& shape, MTLPixelFormat format)
+{
+    auto descriptor = [MTLTextureDescriptor new];
+    descriptor.textureType = toMetalTextureType(shape.kind);
+    descriptor.pixelFormat = format;
+    descriptor.width = (NSUInteger) shape.width;
+    descriptor.height = (NSUInteger) shape.height;
+    descriptor.depth = (NSUInteger) shape.depth;
+    descriptor.arrayLength = (NSUInteger) shape.layers;
+    descriptor.mipmapLevelCount = (NSUInteger) shape.levels;
+    return descriptor;
+}
+
+struct SubresourceViewKey
+{
+    int level = 0;
+    int levelCount = 0;
+    int slice = 0;
+    int sliceCount = 0;
+
+    bool operator==(const SubresourceViewKey&) const = default;
+};
+
 bool canGenerateMipsOnDevice(TextureFormat format)
 {
     switch (format)
@@ -123,31 +280,41 @@ bool canGenerateMipsOnDevice(TextureFormat format)
 }
 } // namespace
 
+// What RenderPipeline-Apple.mm maps a PixelFormat through, by way of
+// textureFormatFor: one table of Metal formats rather than two.
+MTLPixelFormat metalTextureFormat(TextureFormat format)
+{
+    return toMetalFormat(format);
+}
+
 struct Texture::Native
 {
     Native(Device& deviceToUse,
            const TextureDescriptor& descriptor,
-           const void* pixels)
+           const void* pixels,
+           InitialData initialData)
         : device(&deviceToUse)
         , width(descriptor.width)
         , height(descriptor.height)
         , format(descriptor.format)
         , renderTarget(descriptor.renderTarget)
         , computeWrite(descriptor.computeWrite)
-        , cube(descriptor.cube)
     {
         auto metalDevice = (__bridge id<MTLDevice>) deviceToUse.nativeDevice();
 
-        if (metalDevice == nil || width <= 0 || height <= 0)
+        if (metalDevice == nil)
             return;
 
-        // Refused rather than clamped, and refused before anything is created,
-        // so a target the device cannot multisample is an invalid texture rather
-        // than one that silently draws at a different count than the pipelines
-        // compiled for it. See TextureDescriptor::sampleCount; ask
-        // Device::supportsSampleCount to choose a number instead of finding out
-        // here. A count on a texture nothing renders into is ignored, as depth
-        // is, and a multisampled cube is refused with the other two below.
+        const auto resolved = resolveTextureShape(descriptor, initialData);
+
+        if (!resolved)
+            return;
+
+        shape = *resolved;
+        levels = shape.levels;
+
+        // Refused rather than clamped: see TextureDescriptor::sampleCount. A
+        // count on a texture nothing renders into is ignored, as depth is.
         if (renderTarget && descriptor.sampleCount > 1)
         {
             if (!deviceToUse.supportsSampleCount(descriptor.sampleCount))
@@ -156,101 +323,29 @@ struct Texture::Native
             samples = descriptor.sampleCount;
         }
 
-        // Refused here rather than at the bind, by the same question a caller
-        // can ask first: a format outside the guaranteed set is written only
-        // where the device says it can be, which is why R8Unorm is taken here
-        // and BGRA8Unorm is refused on every backend. Nothing is created, so the
-        // texture is invalid rather than a kernel output that quietly does
-        // nothing. See Device::supportsComputeWrite.
+        // Refused rather than created unwritable. See Device::supportsComputeWrite.
         if (computeWrite && !deviceToUse.supportsComputeWrite(descriptor.format))
             return;
 
-        // A cube's faces are square and there are six of them, so a rectangle or
-        // a GPU-written cube has nothing this could create. Refused here rather
-        // than clamped or half-built, and on both backends identically - see
-        // TextureDescriptor::cube.
-        if (cube && (width != height || renderTarget || computeWrite))
+        // See the block formats and RGB9E5Float in Texture.h: sampled only.
+        if (!isRenderableFormat(format) && (renderTarget || computeWrite))
             return;
 
-        // A cube cannot be a render target at all, so it cannot be a
-        // multisampled one either; refused here rather than left to look like it
-        // worked.
-        if (cube && descriptor.sampleCount > 1)
+        if (isCompressedFormat(format) && !deviceToUse.supportsBlockCompression())
             return;
 
-        // A compressed texture is a block of bytes the sampler decodes and
-        // nothing else: there is no per-texel address for a pass or a kernel to
-        // write to. Refused before anything is created, and on a device that has
-        // no BC formats at all the format itself is refused - invalid rather
-        // than quietly something else, which is the answer a refused sampleCount
-        // already gives. See the block formats in Texture.h.
-        if (isCompressedFormat(format))
-        {
-            if (renderTarget || computeWrite)
-                return;
-
-            if (!deviceToUse.supportsBlockCompression())
-                return;
-        }
-
-        if (descriptor.mipLevels < 0)
+        if (shape.kind == TextureType::CubeArray && !deviceToUse.supportsCubeArrays())
             return;
 
-        // A caller-supplied chain is taken as it is, and everything that would
-        // make it a chain nobody could have supplied is refused rather than
-        // reconciled - see TextureDescriptor::mipLevels for each of these.
-        if (descriptor.mipLevels > 0)
-        {
-            if (descriptor.mipmapped || renderTarget || computeWrite || cube)
-                return;
+        // A chain built from the pixels can come from Metal's blit encoder
+        // instead of the CPU, for the formats it filters. See
+        // TextureDescriptor::mipmapsOnDevice.
+        deviceChain = shape.buildsChain() && descriptor.mipmapsOnDevice
+                      && canGenerateMipsOnDevice(format);
 
-            // Nothing was handed over, so there is no chain to take. Refused
-            // rather than created empty, which would be N levels the sampler
-            // reads and nothing ever wrote - the very thing mipmapped avoids by
-            // asking for pixels before it builds anything.
-            if (pixels == nullptr)
-                return;
-
-            if (descriptor.mipLevels > mipLevelCount(width, height))
-                return;
-
-            levels = descriptor.mipLevels;
-            suppliedChain = true;
-        }
-        // A chain eacp builds is only worth asking for when there are pixels to
-        // build it from and a format it can average: a render target or a kernel
-        // output has no pixels at creation, and a compressed one has no average,
-        // so either would get levels nothing ever writes and the sampler would
-        // read them.
-        else if (descriptor.mipmapped && pixels != nullptr
-                 && canBuildMipChain(format))
-        {
-            levels = mipLevelCount(width, height);
-            deviceChain = descriptor.mipmapsOnDevice && canGenerateMipsOnDevice(format);
-        }
-
-        // Two descriptors for one texture, and the only difference is the shape:
-        // a cube is six square slices Metal indexes with a direction, and the
-        // rest of this constructor - the usage, the level count, the upload -
-        // does not care which of the two it got.
         auto textureDescriptor =
-            cube ? [MTLTextureDescriptor
-                       textureCubeDescriptorWithPixelFormat:toMetalFormat(
-                                                                descriptor.format)
-                                                       size:(NSUInteger) width
-                                                  mipmapped:levels > 1 ? YES : NO]
-                 : [MTLTextureDescriptor
-                       texture2DDescriptorWithPixelFormat:toMetalFormat(
-                                                              descriptor.format)
-                                                    width:(NSUInteger) width
-                                                   height:(NSUInteger) height
-                                                mipmapped:levels > 1 ? YES : NO];
+            describeShape(shape, toMetalFormat(descriptor.format));
         textureDescriptor.usage = MTLTextureUsageShaderRead;
-
-        // Set explicitly as well as through the `mipmapped` flag, so the count
-        // the texture is created with and the count the upload loop fills cannot
-        // come from two different pieces of arithmetic.
-        textureDescriptor.mipmapLevelCount = (NSUInteger) levels;
 
         // A render target is written by the GPU and read by it, so it goes in
         // private storage and keeps the default (managed/shared) mode otherwise
@@ -261,17 +356,13 @@ struct Texture::Native
             textureDescriptor.storageMode = MTLStorageModePrivate;
         }
 
-        // A kernel's output only needs the write usage; the storage mode is
-        // deliberately left alone, so a texture a kernel accumulates into can
-        // still be seeded from the CPU with update().
+        // The storage mode is left alone, so a texture a kernel accumulates into
+        // can still be seeded from the CPU with update().
         if (computeWrite)
             textureDescriptor.usage |= MTLTextureUsageShaderWrite;
 
         texture = [metalDevice newTextureWithDescriptor:textureDescriptor];
 
-        // The texture the pass renders into when this target multisamples; this
-        // one becomes what it resolves into. Created after it and refused with
-        // it, so a target is either both textures or invalid.
         if (samples > 1 && texture.get() != nil)
         {
             makeMultisampleTexture(metalDevice, toMetalFormat(descriptor.format));
@@ -291,8 +382,6 @@ struct Texture::Native
                              descriptor.stencil,
                              descriptor.sampleableDepth);
 
-        // The default storage mode keeps replaceRegion valid on every Mac
-        // generation; it handles the CPU-to-GPU synchronisation itself.
         if (texture.get() != nil && pixels != nullptr)
             update(pixels, 0);
     }
@@ -342,11 +431,9 @@ struct Texture::Native
         const auto format = withStencil ? MTLPixelFormatDepth32Float_Stencil8
                                         : MTLPixelFormatDepth32Float;
 
-        auto depthDescriptor = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:format
-                                         width:(NSUInteger) width
-                                        height:(NSUInteger) height
-                                     mipmapped:NO];
+        // The colour target's own shape, levels and slices, so a pass into any
+        // level or layer of it finds a depth plane of the same size there.
+        auto depthDescriptor = describeShape(shape, format);
 
         depthDescriptor.usage = MTLTextureUsageRenderTarget;
 
@@ -369,6 +456,7 @@ struct Texture::Native
         if (sampleable && samples > 1)
         {
             depthDescriptor.textureType = MTLTextureType2D;
+            depthDescriptor.mipmapLevelCount = 1;
             depthDescriptor.sampleCount = 1;
             depthDescriptor.usage =
                 MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -403,6 +491,8 @@ struct Texture::Native
 
         width = (int) CVPixelBufferGetWidth(pixelBuffer);
         height = (int) CVPixelBufferGetHeight(pixelBuffer);
+        shape.width = width;
+        shape.height = height;
 
         CVMetalTextureRef mapped = nullptr;
         auto status = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
@@ -425,48 +515,89 @@ struct Texture::Native
         texture.reset(CVMetalTextureGetTexture(mapped));
     }
 
-    // Every slice of the texture, from one block of bytes: one face or six, one
-    // level or a whole chain, whichever this texture was created as.
-    //
-    // bytesPerRow is the stride *within* a face, which is what makes a cube
-    // assembled out of six separately loaded images uploadable without
-    // repacking. It has to be 0 where the layout is tightly packed by
-    // definition - a compressed texture, or a chain the caller supplied - and a
-    // nonzero one there is dropped rather than used as a pitch it cannot be.
-    // See Texture::update.
     void update(const void* pixels, int bytesPerRow)
     {
-        if (texture.get() == nil || pixels == nullptr || width <= 0 || height <= 0)
+        if (texture.get() == nil)
             return;
 
-        if (bytesPerRow != 0 && (suppliedChain || isCompressedFormat(format)))
+        const auto plan =
+            planWholeUpload(shapeToUpload(), format, pixels, bytesPerRow);
+
+        if (!plan.valid)
             return;
 
-        const auto stride =
-            bytesPerRow != 0 ? bytesPerRow : levelBytesPerRow(format, width);
+        upload(plan.uploads);
 
-        // A face is an ordinary texture as far as everything below here is
-        // concerned: its own slice, and its own chain built from its own pixels
-        // rather than from its neighbours'. See TextureDescriptor::cube for the
-        // order the six are in and why it is the same order on both backends.
-        const auto faceBytes = stride * levelRows(format, height);
-        const auto faces = cube ? 6 : 1;
+        if (deviceChain)
+            generateLevelsOnDevice();
+    }
 
-        for (auto face = 0; face < faces; ++face)
+    TextureShape shapeToUpload() const
+    {
+        if (!deviceChain)
+            return shape;
+
+        auto levelZero = shape;
+        levelZero.levels = 1;
+        return levelZero;
+    }
+
+    void upload(const Vector<SubresourceUpload>& uploads)
+    {
+        if (texture.get() == nil)
+            return;
+
+        if (renderTarget)
         {
-            const auto* facePixels =
-                (const unsigned char*) pixels + face * faceBytes;
-
-            if (suppliedChain)
-                uploadSuppliedChain(face, facePixels);
-            else if (levels > 1 && !deviceChain)
-                uploadChain(face, facePixels, stride);
-            else
-                replaceSlice(face, 0, width, height, facePixels, stride);
+            uploadThroughBlit(uploads);
+            return;
         }
 
-        if (levels > 1 && deviceChain)
-            generateLevelsOnDevice();
+        for (const auto& each: uploads)
+            replaceRegion(each);
+    }
+
+    // bytesPerImage is read only where one call covers several images, which
+    // is a volume; every other kind takes 0.
+    void replaceRegion(const SubresourceUpload& upload)
+    {
+        const auto bytesPerImage = shape.isVolume() ? upload.bytesPerImage : 0;
+
+        [texture.get() replaceRegion:MTLRegionMake3D((NSUInteger) upload.x,
+                                                     (NSUInteger) upload.y,
+                                                     (NSUInteger) upload.z,
+                                                     (NSUInteger) upload.width,
+                                                     (NSUInteger) upload.height,
+                                                     (NSUInteger) upload.depth)
+                         mipmapLevel:(NSUInteger) upload.level
+                               slice:(NSUInteger) upload.slice
+                           withBytes:upload.pixels
+                         bytesPerRow:(NSUInteger) upload.bytesPerRow
+                       bytesPerImage:(NSUInteger) bytesPerImage];
+    }
+
+    // A render target is in private storage, where replaceRegion raises, so
+    // its pixels go through a shared buffer and a blit on the queue: ordered
+    // after everything committed before it, and before every frame after.
+    void uploadThroughBlit(const Vector<SubresourceUpload>& uploads)
+    {
+        auto metalDevice = (__bridge id<MTLDevice>) device->nativeDevice();
+        auto queue = (__bridge id<MTLCommandQueue>) device->nativeQueue();
+
+        if (metalDevice == nil || queue == nil)
+            return;
+
+        @autoreleasepool
+        {
+            auto commandBuffer = [queue commandBuffer];
+            auto blit = [commandBuffer blitCommandEncoder];
+
+            for (const auto& each: uploads)
+                blitUpload(metalDevice, blit, each);
+
+            [blit endEncoding];
+            [commandBuffer commit];
+        }
     }
 
     void generateLevelsOnDevice()
@@ -489,85 +620,69 @@ struct Texture::Native
         }
     }
 
-    // Every level of one slice, from the chain built on the CPU. Not
-    // generateMipmapsForTexture, which would work here and has no counterpart on
-    // D3D12 - see MipChain.h for why one filter shared by both backends is worth
-    // more than a free one on this side only.
-    void uploadChain(int slice, const void* pixels, int bytesPerRow)
+    void blitUpload(id<MTLDevice> metalDevice,
+                    id<MTLBlitCommandEncoder> blit,
+                    const SubresourceUpload& upload)
     {
-        const auto chain = buildMipChain(pixels, width, height, format, bytesPerRow);
+        const auto rowBytes = levelBytesPerRow(format, upload.width);
+        const auto rows = levelRows(format, upload.height);
+        const auto imageBytes = (NSUInteger) rowBytes * (NSUInteger) rows;
 
-        if (!chain.isValid())
+        auto staging = [metalDevice
+            newBufferWithLength:imageBytes * (NSUInteger) upload.depth
+                        options:MTLResourceStorageModeShared];
+
+        if (staging == nil)
             return;
 
-        for (auto level = 0; level < chain.levelCount() && level < levels; ++level)
-        {
-            const auto levelWidth = mipExtent(width, level);
-            const auto levelHeight = mipExtent(height, level);
+        auto* out = (unsigned char*) [staging contents];
+        const auto* in = (const unsigned char*) upload.pixels;
 
-            replaceSlice(slice,
-                         level,
-                         levelWidth,
-                         levelHeight,
-                         chain.level(level),
-                         levelBytesPerRow(format, levelWidth));
-        }
+        for (auto image = 0; image < upload.depth; ++image)
+            for (auto row = 0; row < rows; ++row)
+                std::memcpy(out + (NSUInteger) image * imageBytes
+                                + (NSUInteger) row * (NSUInteger) rowBytes,
+                            in + (std::size_t) image * (std::size_t) upload.bytesPerImage
+                                + (std::size_t) row * (std::size_t) upload.bytesPerRow,
+                            (std::size_t) rowBytes);
+
+        [blit copyFromBuffer:staging
+                   sourceOffset:0
+              sourceBytesPerRow:(NSUInteger) rowBytes
+            sourceBytesPerImage:imageBytes
+                     sourceSize:MTLSizeMake((NSUInteger) upload.width,
+                                            (NSUInteger) upload.height,
+                                            (NSUInteger) upload.depth)
+                      toTexture:texture.get()
+               destinationSlice:(NSUInteger) upload.slice
+               destinationLevel:(NSUInteger) upload.level
+              destinationOrigin:MTLOriginMake((NSUInteger) upload.x,
+                                              (NSUInteger) upload.y,
+                                              (NSUInteger) upload.z)];
     }
 
-    // Every level of one slice, from the chain the caller built - the same loop
-    // as the one above with the source walked rather than produced, since the
-    // layout is the one MipChain packs. No filter runs anywhere here, which is
-    // the entire point of TextureDescriptor::mipLevels.
-    void uploadSuppliedChain(int slice, const void* pixels)
+    // The two old region forms: level 0 of a 2D texture, uncompressed. On any
+    // other kind there is more than one rectangle they could mean, and a
+    // compressed one would have to land on the block grid; both are dropped
+    // rather than guessed at - TextureRegion is how to name either.
+    bool takesLevelZeroRegions() const
     {
-        const auto* bytes = (const unsigned char*) pixels;
-
-        for (auto level = 0; level < levels; ++level)
-        {
-            const auto levelWidth = mipExtent(width, level);
-            const auto levelHeight = mipExtent(height, level);
-
-            replaceSlice(slice,
-                         level,
-                         levelWidth,
-                         levelHeight,
-                         bytes,
-                         levelBytesPerRow(format, levelWidth));
-
-            bytes += levelBytes(format, levelWidth, levelHeight);
-        }
+        return shape.kind == TextureType::TwoD && !isCompressedFormat(format);
     }
 
-    // One rectangle of one slice of one level. bytesPerImage is 0 because this
-    // is a 2D region: Metal reads that argument only where a single
-    // replaceRegion covers more than one image, which is a 3D texture or a whole
-    // array, and never for a cube face uploaded a slice at a time.
-    //
-    // Every caller passes the *whole* level, which is what makes this correct
-    // for a compressed format: Metal wants a region either aligned to the 4x4
-    // block grid or reaching the edge of the level, and the level's own bounds
-    // do both. bytesPerRow is then bytes per block row, which is what
-    // levelBytesPerRow gives.
-    void replaceSlice(int slice,
-                      int level,
-                      int regionWidth,
-                      int regionHeight,
-                      const void* pixels,
-                      int bytesPerRow)
+    static TextureRegion levelZeroRegion(int x,
+                                         int y,
+                                         int regionWidth,
+                                         int regionHeight,
+                                         int bytesPerRow)
     {
-        [texture.get() replaceRegion:MTLRegionMake2D(0,
-                                                    0,
-                                                    (NSUInteger) regionWidth,
-                                                    (NSUInteger) regionHeight)
-                         mipmapLevel:(NSUInteger) level
-                               slice:(NSUInteger) slice
-                           withBytes:pixels
-                         bytesPerRow:(NSUInteger) bytesPerRow
-                       bytesPerImage:0];
+        auto region = TextureRegion {};
+        region.origin = {x, y, 0};
+        region.size = {regionWidth, regionHeight, 1};
+        region.bytesPerRow = bytesPerRow;
+        return region;
     }
 
-    // Where the region overload of update() lands, and the only replaceRegion
-    // here that is not a whole level.
     void updateRegion(int x,
                       int y,
                       int regionWidth,
@@ -575,49 +690,22 @@ struct Texture::Native
                       const void* pixels,
                       int bytesPerRow)
     {
-        if (texture.get() == nil || pixels == nullptr || width <= 0 || height <= 0)
+        if (regionWidth <= 0 || regionHeight <= 0 || !takesLevelZeroRegions())
             return;
 
-        if (regionWidth <= 0 || regionHeight <= 0)
-            return;
-
-        // A cube has six rectangles this could mean, and nothing here says
-        // which - see the header. Dropped rather than sent to +X.
-        if (cube)
-            return;
-
-        // A compressed rectangle would have to land on the 4x4 block grid, so
-        // the rect asked for and the rect written would differ by up to three
-        // texels a side. Dropped rather than rounded, for the same reason an
-        // out-of-bounds one is - see the header.
-        if (isCompressedFormat(format))
-            return;
-
-        // Metal raises on a region that leaves the texture, so an out-of-bounds
-        // request is dropped rather than clamped — see the header for why
-        // clamping would be worse than doing nothing.
-        if (x < 0 || y < 0 || x + regionWidth > width || y + regionHeight > height)
-            return;
-
-        auto stride = bytesPerRow != 0 ? bytesPerRow
-                                       : levelBytesPerRow(format, regionWidth);
-
-        [texture.get() replaceRegion:MTLRegionMake2D((NSUInteger) x,
-                                                     (NSUInteger) y,
-                                                     (NSUInteger) regionWidth,
-                                                     (NSUInteger) regionHeight)
-                         mipmapLevel:0
-                           withBytes:pixels
-                         bytesPerRow:(NSUInteger) stride];
+        update(levelZeroRegion(x, y, regionWidth, regionHeight, bytesPerRow),
+               pixels);
     }
 
-    // Both read() overloads land here, as the update() pair land in
-    // updateRegion.
-    //
-    // Through a shared buffer rather than getBytes, because a render target is
-    // in private storage and getBytes on one raises: the blit is the only way
-    // off the device that works for every texture this class creates, and it is
-    // what GPUView's own snapshot has always done.
+    void update(const TextureRegion& region, const void* pixels)
+    {
+        if (texture.get() == nil)
+            return;
+
+        if (auto upload = planRegionUpload(shape, format, region, pixels))
+            this->upload(Vector<SubresourceUpload> {*upload});
+    }
+
     void readRegion(int x,
                     int y,
                     int regionWidth,
@@ -625,26 +713,25 @@ struct Texture::Native
                     void* dst,
                     int bytesPerRow) const
     {
+        if (regionWidth <= 0 || regionHeight <= 0 || !takesLevelZeroRegions())
+            return;
+
+        read(levelZeroRegion(x, y, regionWidth, regionHeight, bytesPerRow), dst);
+    }
+
+    // Through a shared buffer rather than getBytes, because a render target is
+    // in private storage and getBytes on one raises: the blit is the only way
+    // off the device that works for every texture this class creates.
+    void read(const TextureRegion& region, void* dst) const
+    {
         auto source = (id<MTLTexture>) texture.get();
 
-        if (source == nil || dst == nullptr || device == nullptr)
+        if (source == nil || device == nullptr)
             return;
 
-        if (regionWidth <= 0 || regionHeight <= 0)
-            return;
+        const auto plan = planRegionRead(shape, format, region, dst);
 
-        // Six faces and no argument to name one, exactly as the region upload
-        // has none - see the header.
-        if (cube)
-            return;
-
-        // Blocks rather than pixels, and no decoder at either end - see the
-        // header for why a compressed read-back has nothing to hand back.
-        if (isCompressedFormat(format))
-            return;
-
-        // Dropped rather than clamped, exactly as the upload side drops it.
-        if (x < 0 || y < 0 || x + regionWidth > width || y + regionHeight > height)
+        if (!plan)
             return;
 
         auto metalDevice = (__bridge id<MTLDevice>) device->nativeDevice();
@@ -655,11 +742,12 @@ struct Texture::Native
 
         @autoreleasepool
         {
-            const auto rowBytes = (NSUInteger) levelBytesPerRow(format, regionWidth);
-            const auto imageBytes = rowBytes * (NSUInteger) regionHeight;
+            const auto rowBytes =
+                (NSUInteger) levelBytesPerRow(format, plan->width);
+            const auto imageBytes = rowBytes * (NSUInteger) plan->height;
 
             auto staging =
-                [metalDevice newBufferWithLength:imageBytes
+                [metalDevice newBufferWithLength:imageBytes * (NSUInteger) plan->depth
                                          options:MTLResourceStorageModeShared];
 
             if (staging == nil)
@@ -669,14 +757,14 @@ struct Texture::Native
             auto blit = [commandBuffer blitCommandEncoder];
 
             [blit copyFromTexture:source
-                             sourceSlice:0
-                             sourceLevel:0
-                            sourceOrigin:MTLOriginMake((NSUInteger) x,
-                                                       (NSUInteger) y,
-                                                       0)
-                              sourceSize:MTLSizeMake((NSUInteger) regionWidth,
-                                                     (NSUInteger) regionHeight,
-                                                     1)
+                             sourceSlice:(NSUInteger) plan->slice
+                             sourceLevel:(NSUInteger) plan->level
+                            sourceOrigin:MTLOriginMake((NSUInteger) plan->x,
+                                                       (NSUInteger) plan->y,
+                                                       (NSUInteger) plan->z)
+                              sourceSize:MTLSizeMake((NSUInteger) plan->width,
+                                                     (NSUInteger) plan->height,
+                                                     (NSUInteger) plan->depth)
                                 toBuffer:staging
                        destinationOffset:0
                   destinationBytesPerRow:rowBytes
@@ -689,17 +777,182 @@ struct Texture::Native
             [commandBuffer commit];
             [commandBuffer waitUntilCompleted];
 
-            const auto stride = bytesPerRow != 0 ? (NSUInteger) bytesPerRow
-                                                 : rowBytes;
-
             auto* out = (unsigned char*) dst;
-            auto* in = (const unsigned char*) [staging contents];
+            const auto* in = (const unsigned char*) [staging contents];
 
-            for (auto row = 0; row < regionHeight; ++row)
-                std::memcpy(out + (NSUInteger) row * stride,
-                            in + (NSUInteger) row * rowBytes,
-                            (std::size_t) rowBytes);
+            for (auto image = 0; image < plan->depth; ++image)
+                for (auto row = 0; row < plan->height; ++row)
+                    std::memcpy(out + (std::size_t) image * (std::size_t) plan->bytesPerImage
+                                    + (std::size_t) row * (std::size_t) plan->bytesPerRow,
+                                in + (NSUInteger) image * imageBytes
+                                    + (NSUInteger) row * rowBytes,
+                                (std::size_t) rowBytes);
         }
+    }
+
+    id<MTLTexture> subresourceView(int level,
+                                   int levelCount,
+                                   int slice,
+                                   int sliceCount) const
+    {
+        auto whole = (id<MTLTexture>) texture.get();
+
+        if (whole == nil || level < 0 || levelCount < 1 || slice < 0 || sliceCount < 1
+            || level + levelCount > shape.levels)
+            return nil;
+
+        const auto slices = shape.isVolume() ? 1 : shape.slices();
+
+        if (shape.isVolume())
+        {
+            slice = 0;
+            sliceCount = 1;
+        }
+
+        if (slice + sliceCount > slices)
+            return nil;
+
+        if (level == 0 && levelCount == shape.levels && slice == 0
+            && sliceCount == slices)
+            return whole;
+
+        const auto key = SubresourceViewKey {level, levelCount, slice, sliceCount};
+
+        for (const auto& [cached, view]: views)
+            if (cached == key)
+                return (id<MTLTexture>) view.get();
+
+        const auto type = shape.isVolume()  ? MTLTextureType3D
+                          : sliceCount == 1 ? MTLTextureType2D
+                                            : MTLTextureType2DArray;
+
+        auto view = [whole
+            newTextureViewWithPixelFormat:whole.pixelFormat
+                              textureType:type
+                                   levels:NSMakeRange((NSUInteger) level,
+                                                      (NSUInteger) levelCount)
+                                   slices:NSMakeRange((NSUInteger) slice,
+                                                      (NSUInteger) sliceCount)];
+
+        if (view == nil)
+            return nil;
+
+        auto owned = ObjC::Ptr<NSObject<MTLTexture>> {};
+        owned = (NSObject<MTLTexture>*) view;
+        views.add({key, owned});
+        return view;
+    }
+
+    id<MTLTexture> levelView(int level) const
+    {
+        auto whole = (id<MTLTexture>) texture.get();
+
+        if (whole == nil || level < 0 || level >= shape.levels)
+            return nil;
+
+        if (shape.levels == 1)
+            return whole;
+
+        // Keyed apart from subresourceView's ranges by a negative slice count.
+        const auto key = SubresourceViewKey {level, 1, 0, -1};
+
+        for (const auto& [cached, view]: views)
+            if (cached == key)
+                return (id<MTLTexture>) view.get();
+
+        const auto slices = shape.isVolume() ? 1 : shape.slices();
+
+        auto view = [whole
+            newTextureViewWithPixelFormat:whole.pixelFormat
+                              textureType:whole.textureType
+                                   levels:NSMakeRange((NSUInteger) level, 1)
+                                   slices:NSMakeRange(0, (NSUInteger) slices)];
+
+        if (view == nil)
+            return nil;
+
+        auto owned = ObjC::Ptr<NSObject<MTLTexture>> {};
+        owned = (NSObject<MTLTexture>*) view;
+        views.add({key, owned});
+        return view;
+    }
+
+    // The sampleable plane - the resolve on a multisampled target - as a 2D
+    // texture of one slice, so a shader declaring depth2d reads a layer or a
+    // face of an array or a cube target's depth.
+    id<MTLTexture> depthSliceView(int slice) const
+    {
+        auto plane = resolvedDepthTexture.get() != nil
+                         ? (id<MTLTexture>) resolvedDepthTexture.get()
+                         : (id<MTLTexture>) depthTexture.get();
+
+        if (!sampleableDepth || plane == nil || slice < 0
+            || slice >= (int) plane.arrayLength * sliceFactor(plane))
+            return nil;
+
+        if (plane.textureType == MTLTextureType2D)
+            return plane;
+
+        for (const auto& [cached, view]: depthSliceViews)
+            if (cached == slice)
+                return (id<MTLTexture>) view.get();
+
+        auto view = [plane newTextureViewWithPixelFormat:plane.pixelFormat
+                                             textureType:MTLTextureType2D
+                                                  levels:NSMakeRange(0, 1)
+                                                  slices:NSMakeRange((NSUInteger) slice, 1)];
+
+        if (view == nil)
+            return nil;
+
+        auto owned = ObjC::Ptr<NSObject<MTLTexture>> {};
+        owned = (NSObject<MTLTexture>*) view;
+        depthSliceViews.add({slice, owned});
+        return view;
+    }
+
+    static int sliceFactor(id<MTLTexture> texture)
+    {
+        return texture.textureType == MTLTextureTypeCube
+                       || texture.textureType == MTLTextureTypeCubeArray
+                   ? 6
+                   : 1;
+    }
+
+    // A cube or a cube array retyped as the 2D array of slices it is stored as;
+    // an array is that already, and its level view is the answer.
+    id<MTLTexture> arrayView(int level) const
+    {
+        if (shape.kind == TextureType::TwoDArray)
+            return levelView(level);
+
+        auto whole = (id<MTLTexture>) texture.get();
+
+        if (whole == nil || level < 0 || level >= shape.levels
+            || (shape.kind != TextureType::Cube
+                && shape.kind != TextureType::CubeArray))
+            return nil;
+
+        // Keyed apart from the level views by a slice count of -2.
+        const auto key = SubresourceViewKey {level, 1, 0, -2};
+
+        for (const auto& [cached, view]: views)
+            if (cached == key)
+                return (id<MTLTexture>) view.get();
+
+        auto view = [whole
+            newTextureViewWithPixelFormat:whole.pixelFormat
+                              textureType:MTLTextureType2DArray
+                                   levels:NSMakeRange((NSUInteger) level, 1)
+                                   slices:NSMakeRange(0, (NSUInteger) shape.slices())];
+
+        if (view == nil)
+            return nil;
+
+        auto owned = ObjC::Ptr<NSObject<MTLTexture>> {};
+        owned = (NSObject<MTLTexture>*) view;
+        views.add({key, owned});
+        return view;
     }
 
     // The Device these belong to, for the queue a read-back's blit is committed
@@ -716,14 +969,11 @@ struct Texture::Native
     // RGBA8Unorm, which is the four bytes those buffers always carry.
     TextureFormat format = TextureFormat::RGBA8Unorm;
 
-    // 1 unless a chain was asked for and there were pixels to build one from,
-    // or the caller supplied one of its own.
+    TextureShape shape;
     int levels = 1;
 
-    // Whether those levels arrived with the pixels rather than being built from
-    // level 0, which changes where each level's bytes come from and nothing
-    // else. See TextureDescriptor::mipLevels.
-    bool suppliedChain = false;
+    // Level 0 is uploaded and the blit encoder builds the rest. See
+    // TextureDescriptor::mipmapsOnDevice.
     bool deviceChain = false;
 
     bool renderTarget = false;
@@ -734,11 +984,6 @@ struct Texture::Native
     // texture and the depth buffer were both created at otherwise.
     int samples = 1;
 
-    // Six square slices rather than one rectangle, which changes the descriptor
-    // it was created from, the upload loop, and what the two region-shaped
-    // entry points do - and nothing else.
-    bool cube = false;
-
     // Whether that depth buffer was created able to be sampled as well as
     // attached, which is the one thing a bind through it can check.
     bool sampleableDepth = false;
@@ -748,13 +993,41 @@ struct Texture::Native
     ObjC::Ptr<NSObject<MTLTexture>> depthTexture;
     ObjC::Ptr<NSObject<MTLTexture>> resolvedDepthTexture;
     CFRef<CVMetalTextureRef> cvTexture;
+
+    mutable Vector<std::pair<SubresourceViewKey, ObjC::Ptr<NSObject<MTLTexture>>>>
+        views;
+
+    // Level 0 of each depth slice as a 2D texture, by slice, made on first use.
+    mutable Vector<std::pair<int, ObjC::Ptr<NSObject<MTLTexture>>>> depthSliceViews;
 };
 
 Texture::Texture(Device& device,
                  const TextureDescriptor& descriptor,
                  const void* pixels)
-    : impl(device, descriptor, pixels)
+    : impl(device,
+           descriptor,
+           pixels,
+           pixels != nullptr ? InitialData::Pixels : InitialData::None)
 {
+}
+
+Texture::Texture(Device& device,
+                 const TextureDescriptor& descriptor,
+                 std::span<const TextureSubresource> subresources)
+    : impl(device, descriptor, nullptr, InitialData::Subresources)
+{
+    if (!isValid())
+        return;
+
+    const auto plan = planSubresourceUploads(impl->shape, impl->format, subresources);
+
+    if (!plan.valid)
+    {
+        impl->texture.release();
+        return;
+    }
+
+    impl->upload(plan.uploads);
 }
 
 Texture::Texture(Device& device, void* nativePixelBuffer)
@@ -787,6 +1060,11 @@ void Texture::update(const Graphics::Rect& region,
                        bytesPerRow);
 }
 
+void Texture::updateSubresource(const TextureRegion& region, const void* pixels)
+{
+    impl->update(region, pixels);
+}
+
 void Texture::read(void* dst, int bytesPerRow) const
 {
     if (bytesPerRow < 0)
@@ -800,14 +1078,60 @@ void Texture::read(const Graphics::Rect& region, void* dst, int bytesPerRow) con
     if (bytesPerRow < 0)
         return;
 
-    // Rounded rather than truncated, as update()'s region is: a rect built from
-    // accumulated float arithmetic lands on the texel it is nearest to.
     impl->readRegion((int) std::lround(region.x),
                      (int) std::lround(region.y),
                      (int) std::lround(region.w),
                      (int) std::lround(region.h),
                      dst,
                      bytesPerRow);
+}
+
+void Texture::readSubresource(const TextureRegion& region, void* dst) const
+{
+    impl->read(region, dst);
+}
+
+TextureType Texture::kind() const
+{
+    return impl->shape.kind;
+}
+
+int Texture::arrayLength() const
+{
+    return impl->shape.layers;
+}
+
+int Texture::volumeDepth() const
+{
+    return impl->shape.depth;
+}
+
+int Texture::slices() const
+{
+    return impl->shape.slices();
+}
+
+void* Texture::nativeSubresourceView(int level,
+                                     int levelCount,
+                                     int slice,
+                                     int sliceCount) const
+{
+    return (__bridge void*) impl->subresourceView(level, levelCount, slice, sliceCount);
+}
+
+void* Texture::nativeLevelView(int level) const
+{
+    return (__bridge void*) impl->levelView(level);
+}
+
+void* Texture::nativeArrayView(int level) const
+{
+    return (__bridge void*) impl->arrayView(level);
+}
+
+void* Texture::nativeDepthSliceView(int slice) const
+{
+    return (__bridge void*) impl->depthSliceView(slice);
 }
 
 int Texture::width() const
@@ -818,6 +1142,11 @@ int Texture::width() const
 int Texture::height() const
 {
     return impl->height;
+}
+
+TextureFormat Texture::format() const
+{
+    return impl->format;
 }
 
 bool Texture::isValid() const
@@ -832,7 +1161,7 @@ bool Texture::isRenderTarget() const
 
 bool Texture::isCube() const
 {
-    return impl->cube && impl->texture.get() != nil;
+    return impl->shape.kind == TextureType::Cube && impl->texture.get() != nil;
 }
 
 int Texture::mipLevels() const

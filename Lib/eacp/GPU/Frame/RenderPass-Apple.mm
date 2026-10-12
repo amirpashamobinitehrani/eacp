@@ -2,9 +2,12 @@
 
 #include "RenderPass.h"
 
+#include "IndirectDrawPlan.h"
+
 #include "../Buffer/Buffer.h"
 #include "../Device/Device.h"
 #include "../Pipeline/RenderPipeline.h"
+#include "../Shader/ShaderSource.h"
 #include "../Texture/Texture.h"
 
 #include <eacp/Core/ObjC/ObjC.h>
@@ -105,8 +108,12 @@ struct RenderPass::Native
     bool pipelineBound = false;
 };
 
-RenderPass::RenderPass(void* encoder, int targetWidth, int targetHeight)
-    : impl(encoder, targetWidth, targetHeight)
+RenderPass::RenderPass(void* encoder,
+                       int targetWidth,
+                       int targetHeight,
+                       OcclusionQueries* queries)
+    : occlusionQueries(queries)
+    , impl(encoder, targetWidth, targetHeight)
 {
 }
 
@@ -256,59 +263,203 @@ void RenderPass::setVertexBuffer(const BufferRange& range, int index)
                                atIndex:(NSUInteger) index];
 }
 
+namespace
+{
+void bindStageTexture(NSObject<MTLRenderCommandEncoder>* encoder,
+                      ShaderStage stage,
+                      id<MTLTexture> texture,
+                      int slot,
+                      void* nativeSampler)
+{
+    auto metalSampler = (__bridge id<MTLSamplerState>) nativeSampler;
+
+    if (encoder == nil || texture == nil || metalSampler == nil || slot < 0
+        || slot >= RenderPass::maxStageTextureSlots)
+        return;
+
+    const auto index = (NSUInteger) slot;
+
+    if (stage == ShaderStage::Vertex)
+    {
+        [encoder setVertexTexture:texture atIndex:index];
+        [encoder setVertexSamplerState:metalSampler atIndex:index];
+        return;
+    }
+
+    [encoder setFragmentTexture:texture atIndex:index];
+    [encoder setFragmentSamplerState:metalSampler atIndex:index];
+}
+
+// The resolve on a multisampled target and the attachment itself on a
+// single-sampled one. A depth2d_ms is not what the shader declared and Metal
+// will not bind one to a depth2d, which is why a multisampled target carries a
+// single-sampled twin at all - see TextureDescriptor::sampleCount.
+id<MTLTexture> sampleableDepthOf(const Texture& renderTarget)
+{
+    auto resolved =
+        (__bridge id<MTLTexture>) renderTarget.nativeResolvedDepthTexture();
+
+    return resolved != nil
+               ? resolved
+               : (__bridge id<MTLTexture>) renderTarget.nativeDepthTexture();
+}
+
+id<MTLTexture> colorTextureOf(const Texture& texture)
+{
+    return (__bridge id<MTLTexture>) texture.nativeTexture();
+}
+
+id<MTLTexture> depthTextureOf(const Texture& renderTarget)
+{
+    return renderTarget.hasSampleableDepth() ? sampleableDepthOf(renderTarget) : nil;
+}
+
+id<MTLTexture> depthSliceOf(const Texture& renderTarget, int slice)
+{
+    return (__bridge id<MTLTexture>) renderTarget.nativeDepthSliceView(slice);
+}
+} // namespace
+
+// The state for the sampling the shader declared, not one the texture carries -
+// that is what keeps this backend agreeing with D3D12, where the declaration is
+// the only thing that can pick a sampler for a codegen shader.
 void RenderPass::setFragmentTexture(const Texture& texture,
                                     int slot,
                                     TextureSampling sampling)
 {
-    auto activeEncoder = impl->encoder.get();
-    auto metalTexture = (__bridge id<MTLTexture>) texture.nativeTexture();
-
-    // The state for the sampling the shader declared, not one the texture
-    // carries — that is what keeps this backend agreeing with D3D12, where the
-    // declaration is the only thing that can pick a sampler at all.
-    auto metalSampler =
-        (__bridge id<MTLSamplerState>) Device::shared().nativeSampler(sampling);
-
-    if (activeEncoder == nil || metalTexture == nil || metalSampler == nil)
-        return;
-
-    [activeEncoder setFragmentTexture:metalTexture atIndex:(NSUInteger) slot];
-    [activeEncoder setFragmentSamplerState:metalSampler atIndex:(NSUInteger) slot];
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Fragment,
+                     colorTextureOf(texture),
+                     slot,
+                     Device::shared().nativeSampler(sampling));
 }
 
+void RenderPass::setFragmentTexture(const Texture& texture,
+                                    int slot,
+                                    const Sampler& sampler)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Fragment,
+                     colorTextureOf(texture),
+                     slot,
+                     sampler.nativeSampler());
+}
+
+// A depth texture goes on a texture index like any other; what makes it a
+// depth2d rather than a texture2d is the declaration the shader was compiled
+// with.
 void RenderPass::setFragmentDepthTexture(const Texture& renderTarget,
                                          int slot,
                                          TextureSampling sampling)
 {
-    if (!renderTarget.hasSampleableDepth())
-        return;
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Fragment,
+                     depthTextureOf(renderTarget),
+                     slot,
+                     Device::shared().nativeSampler(sampling));
+}
 
-    auto activeEncoder = impl->encoder.get();
+void RenderPass::setFragmentDepthTexture(const Texture& renderTarget,
+                                         int slot,
+                                         const Sampler& sampler)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Fragment,
+                     depthTextureOf(renderTarget),
+                     slot,
+                     sampler.nativeSampler());
+}
 
-    // The resolve on a multisampled target and the attachment itself on a
-    // single-sampled one. A depth2d_ms is not what the shader declared and Metal
-    // will not bind one to a depth2d, which is why a multisampled target carries
-    // a single-sampled twin at all - see TextureDescriptor::sampleCount.
-    auto resolved =
-        (__bridge id<MTLTexture>) renderTarget.nativeResolvedDepthTexture();
+void RenderPass::setVertexTexture(const Texture& texture,
+                                  int slot,
+                                  TextureSampling sampling)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Vertex,
+                     colorTextureOf(texture),
+                     slot,
+                     Device::shared().nativeSampler(sampling));
+}
 
-    auto metalTexture =
-        resolved != nil
-            ? resolved
-            : (__bridge id<MTLTexture>) renderTarget.nativeDepthTexture();
+void RenderPass::setVertexTexture(const Texture& texture,
+                                  int slot,
+                                  const Sampler& sampler)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Vertex,
+                     colorTextureOf(texture),
+                     slot,
+                     sampler.nativeSampler());
+}
 
-    auto metalSampler =
-        (__bridge id<MTLSamplerState>) Device::shared().nativeSampler(sampling);
+void RenderPass::setVertexDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       TextureSampling sampling)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Vertex,
+                     depthTextureOf(renderTarget),
+                     slot,
+                     Device::shared().nativeSampler(sampling));
+}
 
-    if (activeEncoder == nil || metalTexture == nil || metalSampler == nil)
-        return;
+void RenderPass::setVertexDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       const Sampler& sampler)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Vertex,
+                     depthTextureOf(renderTarget),
+                     slot,
+                     sampler.nativeSampler());
+}
 
-    // The same two calls the colour bind makes, which is the whole of the
-    // difference on this backend: a depth texture goes on a texture index like
-    // any other, and what makes it a depth2d rather than a texture2d is the
-    // declaration the shader was compiled with.
-    [activeEncoder setFragmentTexture:metalTexture atIndex:(NSUInteger) slot];
-    [activeEncoder setFragmentSamplerState:metalSampler atIndex:(NSUInteger) slot];
+void RenderPass::setFragmentDepthTextureSlice(const Texture& renderTarget,
+                                              int slice,
+                                              int slot,
+                                              TextureSampling sampling)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Fragment,
+                     depthSliceOf(renderTarget, slice),
+                     slot,
+                     Device::shared().nativeSampler(sampling));
+}
+
+void RenderPass::setFragmentDepthTextureSlice(const Texture& renderTarget,
+                                              int slice,
+                                              int slot,
+                                              const Sampler& sampler)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Fragment,
+                     depthSliceOf(renderTarget, slice),
+                     slot,
+                     sampler.nativeSampler());
+}
+
+void RenderPass::setVertexDepthTextureSlice(const Texture& renderTarget,
+                                              int slice,
+                                              int slot,
+                                              TextureSampling sampling)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Vertex,
+                     depthSliceOf(renderTarget, slice),
+                     slot,
+                     Device::shared().nativeSampler(sampling));
+}
+
+void RenderPass::setVertexDepthTextureSlice(const Texture& renderTarget,
+                                              int slice,
+                                              int slot,
+                                              const Sampler& sampler)
+{
+    bindStageTexture(impl->encoder.get(),
+                     ShaderStage::Vertex,
+                     depthSliceOf(renderTarget, slice),
+                     slot,
+                     sampler.nativeSampler());
 }
 
 void RenderPass::setVertexStorageBuffer(const Buffer& buffer, int slot)
@@ -480,6 +631,106 @@ void RenderPass::drawIndexedInstanced(const BufferRange& indices,
                             baseInstance:(NSUInteger) firstInstance];
 }
 
+void RenderPass::drawIndirect(const Buffer& arguments,
+                              std::int64_t offset,
+                              int drawCount,
+                              std::int64_t stride)
+{
+    auto plan = planIndirectDraws(
+        arguments, offset, drawCount, stride, sizeof(DrawArguments));
+    auto activeEncoder = impl->encoder.get();
+    auto metalArguments = (__bridge id<MTLBuffer>) arguments.nativeBuffer();
+
+    if (!plan || !impl->pipelineBound || activeEncoder == nil
+        || metalArguments == nil)
+        return;
+
+    for (auto draw = 0; draw < plan->drawCount; ++draw)
+        [activeEncoder drawPrimitives:impl->primitiveType
+                       indirectBuffer:metalArguments
+                 indirectBufferOffset:(NSUInteger) (plan->offset
+                                                    + draw * plan->stride)];
+}
+
+void RenderPass::drawIndirectCount(const Buffer&,
+                                   std::int64_t,
+                                   const Buffer&,
+                                   std::int64_t,
+                                   int,
+                                   std::int64_t)
+{
+    traceIndirectCountUnsupported();
+}
+
+void RenderPass::drawIndexedIndirect(const BufferRange& indices,
+                                     IndexFormat format,
+                                     const Buffer& arguments,
+                                     std::int64_t offset,
+                                     int drawCount,
+                                     std::int64_t stride)
+{
+    auto plan = planIndirectDraws(
+        arguments, offset, drawCount, stride, sizeof(DrawIndexedArguments));
+    auto activeEncoder = impl->encoder.get();
+    auto metalArguments = (__bridge id<MTLBuffer>) arguments.nativeBuffer();
+    auto metalIndices = metalBufferOf(indices);
+
+    if (!plan || !impl->pipelineBound || activeEncoder == nil
+        || metalArguments == nil || metalIndices == nil)
+        return;
+
+    auto indexType = format == IndexFormat::UInt16 ? MTLIndexTypeUInt16
+                                                   : MTLIndexTypeUInt32;
+
+    for (auto draw = 0; draw < plan->drawCount; ++draw)
+        [activeEncoder drawIndexedPrimitives:impl->primitiveType
+                                   indexType:indexType
+                                 indexBuffer:metalIndices
+                           indexBufferOffset:(NSUInteger) indices.offset
+                              indirectBuffer:metalArguments
+                        indirectBufferOffset:(NSUInteger) (plan->offset
+                                                           + draw * plan->stride)];
+}
+
+void RenderPass::drawIndexedIndirectCount(const BufferRange&,
+                                          IndexFormat,
+                                          const Buffer&,
+                                          std::int64_t,
+                                          const Buffer&,
+                                          std::int64_t,
+                                          int,
+                                          std::int64_t)
+{
+    traceIndirectCountUnsupported();
+}
+
+// A query is a mode set at an offset of the pass's visibility buffer: every
+// draw until the mode changes counts into those eight bytes. Disabled is set at
+// the same offset rather than at zero, since naming an offset is what makes
+// Metal write it - closing at zero would zero query 0 in every pass.
+void RenderPass::nativeBeginOcclusionQuery(int index, OcclusionMode mode)
+{
+    if (auto activeEncoder = impl->encoder.get())
+        [activeEncoder
+            setVisibilityResultMode:mode == OcclusionMode::AnySamples
+                                        ? MTLVisibilityResultModeBoolean
+                                        : MTLVisibilityResultModeCounting
+                             offset:(NSUInteger) index * sizeof(std::uint64_t)];
+}
+
+void RenderPass::nativeEndOcclusionQuery(int index, OcclusionMode)
+{
+    if (auto activeEncoder = impl->encoder.get())
+        [activeEncoder
+            setVisibilityResultMode:MTLVisibilityResultModeDisabled
+                             offset:(NSUInteger) index * sizeof(std::uint64_t)];
+}
+
+void RenderPass::resolveOcclusionQueries()
+{
+    // Nothing to record: the pass writes the buffer as it ends.
+}
+
 void RenderPass::end()
 {
     if (impl->ended)
@@ -488,6 +739,9 @@ void RenderPass::end()
     // Before endEncoding, so a batching renderer's queued draws still reach
     // this encoder. See RenderPass::Participant.
     drainParticipants();
+
+    // After them, so a participant's draws inside an open query count.
+    endOcclusionQuery();
 
     if (auto activeEncoder = impl->encoder.get())
         [activeEncoder endEncoding];

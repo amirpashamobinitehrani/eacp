@@ -1,9 +1,13 @@
 #include "Device.h"
 
+#include "../Frame/Frame.h"
+
 #include <eacp/Core/Threads/ThreadUtils.h>
 #include <eacp/Graphics/Image/Image.h>
 
 #include <cassert>
+#include <mutex>
+#include <unordered_map>
 
 // Portable Device members. The platform backends (Device-macOS.mm /
 // Device-Windows.cpp) own construction and the native handles; anything that
@@ -63,9 +67,65 @@ Texture Device::makeTexture(const TextureDescriptor& descriptor, const void* pix
     return {*this, descriptor, pixels};
 }
 
+Texture Device::makeTextureFromSubresources(
+    const TextureDescriptor& descriptor,
+    std::span<const TextureSubresource> subresources)
+{
+    return {*this, descriptor, subresources};
+}
+
 Texture Device::wrapPixelBuffer(void* nativePixelBuffer)
 {
     return {*this, nativePixelBuffer};
+}
+
+struct Device::SamplerCache
+{
+    std::mutex mutex;
+    std::unordered_map<SamplerDescriptor, Sampler, SamplerDescriptorHash> samplers;
+};
+
+std::shared_ptr<Device::SamplerCache> Device::makeSamplerCache()
+{
+    return std::make_shared<SamplerCache>();
+}
+
+namespace
+{
+constexpr TextureSampling samplingConfigurationsInOrder[] = {
+    {TextureFilter::Nearest, TextureAddressMode::Clamp},
+    {TextureFilter::Nearest, TextureAddressMode::Repeat},
+    {TextureFilter::Linear, TextureAddressMode::Clamp},
+    {TextureFilter::Linear, TextureAddressMode::Repeat},
+};
+} // namespace
+
+Sampler Device::makeSampler(const SamplerDescriptor& descriptor)
+{
+    if (!isValid())
+        return {};
+
+    auto lock = std::scoped_lock(samplers->mutex);
+    auto& cache = samplers->samplers;
+
+    if (auto found = cache.find(descriptor); found != cache.end())
+        return found->second;
+
+    auto native = static_cast<void*>(nullptr);
+
+    for (const auto& sampling: samplingConfigurationsInOrder)
+        if (SamplerDescriptor::from(sampling) == descriptor)
+            native = nativeSampler(sampling);
+
+    if (native == nullptr)
+        native = createNativeSampler(descriptor);
+
+    if (native == nullptr)
+        return {};
+
+    auto sampler = Sampler {native, descriptor};
+    cache.emplace(descriptor, sampler);
+    return sampler;
 }
 
 ShaderLibrary Device::makeShaderLibrary(const ShaderSource& source)
@@ -95,6 +155,36 @@ const FrameTimings& Device::lastFrameTimings() const
     return timer.lastTimings();
 }
 
+std::uint64_t Device::frameIndex() const
+{
+    return frameCount;
+}
+
+bool Device::isFrameOpen() const
+{
+    return openFrame != nullptr;
+}
+
+FrameTimer& Device::frameTimer()
+{
+    return timer;
+}
+
+int Device::buffersCreated() const
+{
+    return bufferCount;
+}
+
+void Device::noteBufferCreated()
+{
+    ++bufferCount;
+}
+
+void Device::followMainThread()
+{
+    mainThreadOwned = true;
+}
+
 bool Device::supportsPassTimings() const
 {
     return timer.isSupported();
@@ -116,11 +206,45 @@ void Device::beginFrame()
     // that covers the render and compute passes a Frame goes on to open.
     assertOwningThread();
 
+    // A nested frame's passes belong to the frame it is nested in.
+    if (openFrames > 1)
+        return;
+
     ++frameCount;
 
     // The timer takes its slot from the counter, the same way StreamingBuffers
     // takes its pool from it - one advance, driven by whoever built the Frame,
     // and nothing for either of them to be told separately.
     timer.beginFrame(frameCount, *this);
+}
+
+FrameNesting Device::enterFrame(Frame& frame)
+{
+    assertOwningThread();
+
+    auto nesting = FrameNesting {openFrame};
+
+    if (nesting.outer != nullptr)
+    {
+        nesting.outer->flush();
+        nesting.timerSlot = timer.suspend();
+    }
+
+    openFrame = &frame;
+    ++openFrames;
+
+    return nesting;
+}
+
+void Device::leaveFrame(const FrameNesting& nesting)
+{
+    openFrame = nesting.outer;
+    --openFrames;
+
+    if (nesting.outer == nullptr)
+        return;
+
+    timer.resume(nesting.timerSlot);
+    nesting.outer->resumeRecording();
 }
 } // namespace eacp::GPU

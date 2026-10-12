@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 
 namespace eacp::GPU
 {
@@ -266,6 +267,56 @@ bool acceptsRecording(ID3D12Device* device, Record&& record)
     return SUCCEEDED(list->Close());
 }
 
+// The PCI id and the four-character code ("QCOM") Qualcomm adapters report.
+constexpr UINT qualcommVendorIds[] = {0x5143, 0x4D4F4351};
+
+UINT adapterVendorId(ID3D12Device* device)
+{
+    auto factory = winrt::com_ptr<IDXGIFactory4>();
+    auto adapter = winrt::com_ptr<IDXGIAdapter1>();
+    auto description = DXGI_ADAPTER_DESC1 {};
+
+    if (FAILED(CreateDXGIFactory2(0, __uuidof(IDXGIFactory4), factory.put_void()))
+        || FAILED(factory->EnumAdapterByLuid(
+            device->GetAdapterLuid(), __uuidof(IDXGIAdapter1), adapter.put_void()))
+        || FAILED(adapter->GetDesc1(&description)))
+        return 0;
+
+    return description.VendorId;
+}
+
+// Unset, the adapter decides; "1" forces per-bind sampler tables (to check
+// whether an affected driver has been fixed) and "0" forces the static
+// fallback anywhere.
+std::optional<bool> samplerTablesOverride()
+{
+    std::size_t length = 0;
+    char value[8] = {};
+
+    if (getenv_s(&length, value, sizeof(value), "EACP_D3D12_SAMPLER_TABLES") != 0
+        || length <= 1)
+        return std::nullopt;
+
+    return value[0] != '0';
+}
+
+// The sampler-table bug is not one a recording can reveal: the table binds and
+// draws, through the wrong sampler. Finding it by trial would mean rendering and
+// reading back on a throwaway device at every start, so it is found by adapter
+// instead - every Qualcomm adapter, which is where it was seen (Adreno, Windows
+// 11 26200) - with EACP_D3D12_SAMPLER_TABLES to overrule the guess either way.
+bool detectsSamplerTableBug(ID3D12Device* device)
+{
+    if (auto forced = samplerTablesOverride())
+        return !*forced;
+
+    const auto vendor = device != nullptr ? adapterVendorId(device) : 0;
+
+    return std::find(
+               std::begin(qualcommVendorIds), std::end(qualcommVendorIds), vendor)
+           != std::end(qualcommVendorIds);
+}
+
 // Asks the hardware driver, on a device made for the purpose, whether it will
 // take the two recordings the flags in DriverQuirks describe.
 //
@@ -290,11 +341,15 @@ DriverQuirks probeDriverQuirks()
     {
         quirks.noDepthResolve = true;
         quirks.noBoxedTextureCopy = true;
+        quirks.samplerTablesIgnoreOffset = !samplerTablesOverride().value_or(false);
         return quirks;
     }
 
     if (forcesWarp())
+    {
+        quirks.samplerTablesIgnoreOffset = detectsSamplerTableBug(nullptr);
         return quirks;
+    }
 
     auto device = winrt::com_ptr<ID3D12Device>();
 
@@ -304,6 +359,7 @@ DriverQuirks probeDriverQuirks()
                                  device.put_void())))
         return quirks;
 
+    quirks.samplerTablesIgnoreOffset = detectsSamplerTableBug(device.get());
     quirks.noDepthResolve = !acceptsRecording(device.get(), recordDepthResolve);
     quirks.noBoxedTextureCopy =
         !acceptsRecording(device.get(), recordBoxedTextureCopy);
@@ -315,6 +371,10 @@ DriverQuirks probeDriverQuirks()
     if (quirks.noBoxedTextureCopy)
         LOG("D3D12: this driver refuses a boxed texture read-back; "
             "reading whole textures and cropping instead");
+
+    if (quirks.samplerTablesIgnoreOffset)
+        LOG("D3D12: sampler descriptor tables are not trusted on this adapter; "
+            "per-bind samplers fall back to a fixed static sampler");
 
     return quirks;
 }
@@ -411,9 +471,8 @@ std::string describeAdapter(ID3D12Device* device)
 
     auto adapter = winrt::com_ptr<IDXGIAdapter1>();
 
-    if (FAILED(factory->EnumAdapterByLuid(device->GetAdapterLuid(),
-                                          __uuidof(IDXGIAdapter1),
-                                          adapter.put_void())))
+    if (FAILED(factory->EnumAdapterByLuid(
+            device->GetAdapterLuid(), __uuidof(IDXGIAdapter1), adapter.put_void())))
         return "unknown adapter";
 
     auto description = DXGI_ADAPTER_DESC1 {};
@@ -422,6 +481,25 @@ std::string describeAdapter(ID3D12Device* device)
         return "unknown adapter";
 
     return Strings::narrow(description.Description);
+}
+
+// What a per-bind sampler register holds when the driver cannot be given a
+// sampler table: linear filtering with repeat on every axis, which is bgfx's
+// default sampler state and so what most draws through such a register ask for.
+D3D12_STATIC_SAMPLER_DESC fallbackPerBindSampler(int slot,
+                                                 D3D12_SHADER_VISIBILITY visibility)
+{
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    sampler.ShaderRegister = samplerRegister(slot);
+    sampler.ShaderVisibility = visibility;
+    return sampler;
 }
 
 winrt::com_ptr<ID3D12RootSignature>
@@ -457,6 +535,14 @@ void addRenderingDeviceReplacedListener(std::function<void()> listener);
 
 namespace eacp::GPU
 {
+void CommandContext::rewindUploads()
+{
+    for (auto& chunk: uploads)
+        chunk.used = 0;
+
+    uploadCursor = 0;
+}
+
 D3D12Shared::D3D12Shared()
 {
     createAll();
@@ -510,9 +596,11 @@ void D3D12Shared::createDevice()
 
 void D3D12Shared::createRootSignatures()
 {
+    const auto samplerTables = !quirks.samplerTablesIgnoreOffset;
+
     D3D12_DESCRIPTOR_RANGE srvRanges[maxTextureSlots] = {};
-    D3D12_ROOT_PARAMETER
-    renderParams[2 * maxUniformSlots + maxTextureSlots + 2 * maxBufferSlots];
+    D3D12_DESCRIPTOR_RANGE samplerRanges[maxTextureSlots] = {};
+    D3D12_ROOT_PARAMETER renderParams[renderParamCount] = {};
 
     for (auto slot = 0; slot < maxUniformSlots; ++slot)
     {
@@ -522,13 +610,18 @@ void D3D12Shared::createRootSignatures()
             rootCBV(static_cast<UINT>(slot), D3D12_SHADER_VISIBILITY_PIXEL);
     }
 
+    // Visible to every stage, so a vertex shader samples through the same tables
+    // and a slot is one binding the two stages share. The signature spends 56 of
+    // its 64 DWORDs - four root CBVs, sixteen root SRVs and sixteen tables - so a
+    // vertex table and sampler table per slot, sixteen more, do not fit.
     for (auto slot = 0; slot < maxTextureSlots; ++slot)
     {
         srvRanges[slot].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srvRanges[slot].NumDescriptors = 1;
         srvRanges[slot].BaseShaderRegister = static_cast<UINT>(slot);
 
-        renderParams[renderTextureParam(slot)] = rootTable(&srvRanges[slot]);
+        renderParams[renderTextureParam(slot)] =
+            rootTable(&srvRanges[slot], D3D12_SHADER_VISIBILITY_ALL);
     }
 
     // The storage buffers a vertex or fragment stage subscripts. Root
@@ -557,7 +650,8 @@ void D3D12Shared::createRootSignatures()
     // to descriptor 0 of the bound heap, so all textures in the process sample
     // through whichever sampler happens to be first. Static samplers never reach
     // a heap and are unaffected. See TextureSampling.
-    D3D12_STATIC_SAMPLER_DESC staticSamplers[samplingConfigurations] = {};
+    D3D12_STATIC_SAMPLER_DESC
+    staticSamplers[samplingConfigurations + maxTextureSlots] = {};
 
     for (auto configuration = 0; configuration < samplingConfigurations;
          ++configuration)
@@ -582,13 +676,41 @@ void D3D12Shared::createRootSignatures()
         sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
         sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
         sampler.ShaderRegister = static_cast<UINT>(configuration);
-        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
 
+    // The per-bind samplers, at s<samplerRegisterBase + slot>: a one-descriptor
+    // sampler table per texture slot that RenderPass::setFragmentTexture points
+    // at a Sampler's descriptor - or, where the driver mishandles sampler
+    // tables, a fixed static sampler at the same register, so a shader declaring
+    // one still compiles against this signature and samples something sane.
+    for (auto slot = 0; slot < maxTextureSlots; ++slot)
+    {
+        if (samplerTables)
+        {
+            samplerRanges[slot].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            samplerRanges[slot].NumDescriptors = 1;
+            samplerRanges[slot].BaseShaderRegister = samplerRegister(slot);
+
+            renderParams[renderSamplerParam(slot)] =
+                rootTable(&samplerRanges[slot], D3D12_SHADER_VISIBILITY_ALL);
+        }
+        else
+        {
+            staticSamplers[samplingConfigurations + slot] =
+                fallbackPerBindSampler(slot, D3D12_SHADER_VISIBILITY_ALL);
+        }
+    }
+
+    const auto perBindParams = samplerTables ? maxTextureSlots : 0;
+    const auto perBindStatics = samplerTables ? 0 : maxTextureSlots;
+
     D3D12_ROOT_SIGNATURE_DESC renderDesc = {};
-    renderDesc.NumParameters = static_cast<UINT>(std::size(renderParams));
+    renderDesc.NumParameters =
+        static_cast<UINT>(renderParamCount - maxTextureSlots + perBindParams);
     renderDesc.pParameters = renderParams;
-    renderDesc.NumStaticSamplers = static_cast<UINT>(std::size(staticSamplers));
+    renderDesc.NumStaticSamplers =
+        static_cast<UINT>(samplingConfigurations + perBindStatics);
     renderDesc.pStaticSamplers = staticSamplers;
     renderDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -596,8 +718,7 @@ void D3D12Shared::createRootSignatures()
 
     D3D12_DESCRIPTOR_RANGE computeSrvRanges[maxTextureSlots] = {};
     D3D12_DESCRIPTOR_RANGE computeUavRanges[maxTextureSlots] = {};
-    D3D12_ROOT_PARAMETER
-    computeParams[maxUniformSlots + 2 * maxBufferSlots + 2 * maxTextureSlots];
+    D3D12_ROOT_PARAMETER computeParams[computeParamCount] = {};
 
     for (auto slot = 0; slot < maxUniformSlots; ++slot)
         computeParams[computeCBVParam(slot)] =
@@ -636,18 +757,26 @@ void D3D12Shared::createRootSignatures()
     // one read the identical emitted source. Only the visibility differs, for
     // the reason rootTable takes one: a compute root signature accepts nothing
     // but ALL.
-    D3D12_STATIC_SAMPLER_DESC computeSamplers[samplingConfigurations] = {};
+    D3D12_STATIC_SAMPLER_DESC
+    computeSamplers[samplingConfigurations + maxTextureSlots] = {};
 
-    for (auto i = 0; i < samplingConfigurations; ++i)
+    for (auto i = 0; i < samplingConfigurations + perBindStatics; ++i)
     {
         computeSamplers[i] = staticSamplers[i];
         computeSamplers[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
 
+    if (samplerTables)
+        for (auto slot = 0; slot < maxTextureSlots; ++slot)
+            computeParams[computeSamplerParam(slot)] =
+                rootTable(&samplerRanges[slot], D3D12_SHADER_VISIBILITY_ALL);
+
     D3D12_ROOT_SIGNATURE_DESC computeDesc = {};
-    computeDesc.NumParameters = static_cast<UINT>(std::size(computeParams));
+    computeDesc.NumParameters =
+        static_cast<UINT>(computeParamCount - maxTextureSlots + perBindParams);
     computeDesc.pParameters = computeParams;
-    computeDesc.NumStaticSamplers = static_cast<UINT>(std::size(computeSamplers));
+    computeDesc.NumStaticSamplers =
+        static_cast<UINT>(samplingConfigurations + perBindStatics);
     computeDesc.pStaticSamplers = computeSamplers;
 
     computeRootSignature = makeRootSignature(device.get(), computeDesc);
@@ -680,6 +809,31 @@ ID3D12CommandSignature* D3D12Shared::getDispatchSignature()
                                    dispatchSignature.put_void());
 
     return dispatchSignature.get();
+}
+
+ID3D12CommandSignature* D3D12Shared::getDrawSignature(bool indexed, UINT stride)
+{
+    if (device == nullptr)
+        return nullptr;
+
+    auto& signature = drawSignatures[{indexed, stride}];
+
+    if (signature != nullptr)
+        return signature.get();
+
+    D3D12_INDIRECT_ARGUMENT_DESC argument = {};
+    argument.Type = indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
+                            : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+
+    D3D12_COMMAND_SIGNATURE_DESC desc = {};
+    desc.ByteStride = stride;
+    desc.NumArgumentDescs = 1;
+    desc.pArgumentDescs = &argument;
+
+    device->CreateCommandSignature(
+        &desc, nullptr, __uuidof(ID3D12CommandSignature), signature.put_void());
+
+    return signature.get();
 }
 
 namespace
@@ -790,14 +944,165 @@ const D3D12Shared::DepthResolveShader&
     return shader;
 }
 
+namespace
+{
+// Level n from level n - 1, each output texel the mean of the two, four or
+// eight under it, an odd edge clamped onto its last texel. Read and written
+// through UAVs because D3D12 tracks the resource's state whole: one level
+// cannot be a shader resource while the next is unordered access.
+constexpr auto mipSource = R"(
+#if MIP_KIND == 2
+RWTexture3D<float4> source : register(MIP_SOURCE);
+RWTexture3D<float4> target : register(MIP_TARGET);
+
+[numthreads(4, 4, 4)]
+void computeMain(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height, depth;
+    target.GetDimensions(width, height, depth);
+
+    if (id.x >= width || id.y >= height || id.z >= depth)
+        return;
+
+    uint sourceWidth, sourceHeight, sourceDepth;
+    source.GetDimensions(sourceWidth, sourceHeight, sourceDepth);
+    uint3 last = uint3(sourceWidth, sourceHeight, sourceDepth) - 1;
+
+    float4 sum = 0.0;
+
+    for (uint corner = 0; corner < 8; ++corner)
+    {
+        uint3 offset = uint3(corner & 1, (corner >> 1) & 1, corner >> 2);
+        sum += source[min(id * 2 + offset, last)];
+    }
+
+    target[id] = sum * 0.125;
+}
+#elif MIP_KIND == 1
+RWTexture2DArray<float4> source : register(MIP_SOURCE);
+RWTexture2DArray<float4> target : register(MIP_TARGET);
+
+[numthreads(8, 8, 1)]
+void computeMain(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height, slices;
+    target.GetDimensions(width, height, slices);
+
+    if (id.x >= width || id.y >= height || id.z >= slices)
+        return;
+
+    uint sourceWidth, sourceHeight, sourceSlices;
+    source.GetDimensions(sourceWidth, sourceHeight, sourceSlices);
+    uint2 last = uint2(sourceWidth, sourceHeight) - 1;
+    uint2 at = id.xy * 2;
+
+    float4 sum = source[uint3(min(at, last), id.z)]
+                 + source[uint3(min(at + uint2(1, 0), last), id.z)]
+                 + source[uint3(min(at + uint2(0, 1), last), id.z)]
+                 + source[uint3(min(at + uint2(1, 1), last), id.z)];
+
+    target[id] = sum * 0.25;
+}
+#else
+RWTexture2D<float4> source : register(MIP_SOURCE);
+RWTexture2D<float4> target : register(MIP_TARGET);
+
+[numthreads(8, 8, 1)]
+void computeMain(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    target.GetDimensions(width, height);
+
+    if (id.x >= width || id.y >= height)
+        return;
+
+    uint sourceWidth, sourceHeight;
+    source.GetDimensions(sourceWidth, sourceHeight);
+    uint2 last = uint2(sourceWidth, sourceHeight) - 1;
+    uint2 at = id.xy * 2;
+
+    float4 sum = source[min(at, last)] + source[min(at + uint2(1, 0), last)]
+                 + source[min(at + uint2(0, 1), last)]
+                 + source[min(at + uint2(1, 1), last)];
+
+    target[id.xy] = sum * 0.25;
+}
+#endif
+)";
+
+winrt::com_ptr<ID3DBlob> compileMipKernel(int kind)
+{
+    const auto kindName = std::to_string(kind);
+    const auto sourceRegister = "u" + std::to_string(computeTextureRegister(0));
+    const auto targetRegister = "u" + std::to_string(computeTextureRegister(1));
+
+    const D3D_SHADER_MACRO defines[] = {{"MIP_KIND", kindName.c_str()},
+                                        {"MIP_SOURCE", sourceRegister.c_str()},
+                                        {"MIP_TARGET", targetRegister.c_str()},
+                                        {nullptr, nullptr}};
+
+    auto code = winrt::com_ptr<ID3DBlob>();
+    auto errors = winrt::com_ptr<ID3DBlob>();
+
+    if (FAILED(D3DCompile(mipSource,
+                          std::strlen(mipSource),
+                          nullptr,
+                          defines,
+                          nullptr,
+                          "computeMain",
+                          "cs_5_0",
+                          D3DCOMPILE_ENABLE_STRICTNESS,
+                          0,
+                          code.put(),
+                          errors.put())))
+    {
+        if (errors != nullptr)
+            LOG(static_cast<const char*>(errors->GetBufferPointer()));
+
+        return nullptr;
+    }
+
+    return code;
+}
+} // namespace
+
+ID3D12PipelineState* D3D12Shared::getMipShader(int kind)
+{
+    if (kind < 0 || kind > 2 || device == nullptr || computeRootSignature == nullptr)
+        return nullptr;
+
+    auto& state = mipShaders[kind];
+
+    if (state != nullptr)
+        return state.get();
+
+    const auto code = compileMipKernel(kind);
+
+    if (code == nullptr)
+        return nullptr;
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = computeRootSignature.get();
+    desc.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+
+    device->CreateComputePipelineState(
+        &desc, __uuidof(ID3D12PipelineState), state.put_void());
+
+    return state.get();
+}
+
 void D3D12Shared::recreateAfterDeviceLoss()
 {
     renderRootSignature = nullptr;
     computeRootSignature = nullptr;
     dispatchSignature = nullptr;
+    drawSignatures.clear();
 
     for (auto& shader: depthResolveShaders)
         shader = {};
+
+    for (auto& state: mipShaders)
+        state = nullptr;
 
     device = nullptr;
 

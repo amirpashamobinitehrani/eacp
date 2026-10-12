@@ -12,11 +12,28 @@
 
 namespace eacp::GPU
 {
+class Sampler;
+
 
 // One: the GLSL emitter writes exactly one uniform block.
 constexpr int maxUniformSlots = 1;
 
-constexpr int maxBufferSlots = ComputePass::maxBufferSlots;
+// A render stage's storage buffers, which every backend binds the same eight of.
+constexpr int maxBufferSlots = ComputePass::portableBufferSlots;
+
+constexpr int maxComputeBufferSlots = ComputePass::maxBufferSlots;
+
+// The compute layout declares every slot, so a device whose per-stage
+// storage-buffer limit is below maxComputeBufferSlots gets that many and no more.
+int vulkanComputeBufferSlots(const VkPhysicalDeviceLimits& limits);
+
+int vulkanComputeBufferSlots();
+
+// The render layout declares all sixteen; the spec's floor for both limits is
+// sixteen, so the clamp is for a device reporting less than it should.
+int vulkanTextureSlots(const VkPhysicalDeviceLimits& limits);
+
+int vulkanTextureSlots();
 
 static_assert(vulkanComputeUniformBinding
                   == ComputePass::textureRegisterBase + maxTextureSlots,
@@ -36,76 +53,25 @@ struct VulkanBufferData
 };
 
 // Exhaustive rather than defaulted: a new format is then a -Wswitch warning.
-inline VkFormat toVkFormat(TextureFormat format)
-{
-    switch (format)
-    {
-        case TextureFormat::RGBA8Unorm:
-            return VK_FORMAT_R8G8B8A8_UNORM;
-        case TextureFormat::BGRA8Unorm:
-            return VK_FORMAT_B8G8R8A8_UNORM;
-        case TextureFormat::R8Unorm:
-            return VK_FORMAT_R8_UNORM;
-        case TextureFormat::RG8Unorm:
-            return VK_FORMAT_R8G8_UNORM;
-        case TextureFormat::RGBA16Float:
-            return VK_FORMAT_R16G16B16A16_SFLOAT;
-        case TextureFormat::RGBA32Float:
-            return VK_FORMAT_R32G32B32A32_SFLOAT;
-        case TextureFormat::R32Float:
-            return VK_FORMAT_R32_SFLOAT;
-        case TextureFormat::BC1RGBA:
-            return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-        case TextureFormat::BC2RGBA:
-            return VK_FORMAT_BC2_UNORM_BLOCK;
-        case TextureFormat::BC3RGBA:
-            return VK_FORMAT_BC3_UNORM_BLOCK;
-        case TextureFormat::BC7RGBA:
-            return VK_FORMAT_BC7_UNORM_BLOCK;
-    }
+VkFormat toVkFormat(TextureFormat format);
 
-    return VK_FORMAT_UNDEFINED;
-}
-
-inline VkFormat toVkFormat(PixelFormat format)
-{
-    switch (format)
-    {
-        case PixelFormat::BGRA8Unorm:
-            return VK_FORMAT_B8G8R8A8_UNORM;
-        case PixelFormat::RGBA8Unorm:
-            return VK_FORMAT_R8G8B8A8_UNORM;
-        case PixelFormat::RGBA16Float:
-            return VK_FORMAT_R16G16B16A16_SFLOAT;
-        case PixelFormat::RGBA32Float:
-            return VK_FORMAT_R32G32B32A32_SFLOAT;
-        case PixelFormat::R32Float:
-            return VK_FORMAT_R32_SFLOAT;
-    }
-
-    return VK_FORMAT_UNDEFINED;
-}
+// Through the texture format the attachment is the attachment of, so the two
+// cannot disagree.
+VkFormat toVkFormat(PixelFormat format);
 
 // D32 rather than D24_UNORM_S8_UINT: precision does not change with stencil.
-inline VkFormat depthAttachmentFormat(bool withStencil)
-{
-    return withStencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT;
-}
+VkFormat depthAttachmentFormat(bool withStencil);
 
 // A depth image with a stencil plane is transitioned on both aspects at once.
-inline VkImageAspectFlags depthAspectMask(bool withStencil)
-{
-    if (withStencil)
-        return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-
-    return VK_IMAGE_ASPECT_DEPTH_BIT;
-}
+VkImageAspectFlags depthAspectMask(bool withStencil);
 
 // The flag bit for a sample count is the count itself: 1, 2, 4, 8 in order.
-inline VkSampleCountFlagBits toVkSampleCount(int samples)
-{
-    return static_cast<VkSampleCountFlagBits>(samples < 1 ? 1 : samples);
-}
+VkSampleCountFlagBits toVkSampleCount(int samples);
+
+VkCompareOp toVkCompareOp(CompareFunction compare);
+
+// The VkSampler a made Sampler wraps.
+VkSampler toVkSampler(const Sampler& sampler);
 
 struct ImageUse
 {
@@ -123,13 +89,15 @@ struct ImageUse
 // Barriers are illegal inside a render pass, so every image has a resting use.
 inline constexpr auto imageSampled = ImageUse {
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+    VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
 
 // GENERAL, Vulkan having no storage-image layout; a sampler reads it too.
 inline constexpr auto imageStorage = ImageUse {
     VK_IMAGE_LAYOUT_GENERAL,
-    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
+        | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
     VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT};
 
 inline constexpr auto imageTransferSrc =
@@ -168,45 +136,42 @@ inline constexpr auto imageDepthAttachment =
                   | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT};
 
 // The one layout legal for both aspects of a depth buffer carrying stencil.
-inline constexpr auto imageDepthSampled =
-    ImageUse {VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-              VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+// Compute among the stages, for ComputePass::setInputDepthTexture.
+inline constexpr auto imageDepthSampled = ImageUse {
+    VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
 
 // Tracked for the image's whole life: a layout survives a submission.
-inline void recordImageBarrier(VkCommandBuffer commandBuffer,
-                               VkImage image,
-                               VkImageAspectFlags aspect,
-                               ImageUse& use,
-                               const ImageUse& target)
+void recordImageBarrier(VkCommandBuffer commandBuffer,
+                        VkImage image,
+                        VkImageAspectFlags aspect,
+                        ImageUse& use,
+                        const ImageUse& target);
+
+// A view of one level and a run of layers of a texture or its depth
+// companion, made the first time a pass or a kernel names it: a colour or
+// depth attachment of `count` layers from `slice`, or (`perLevel`) a sampled or
+// storage view of one level and every slice.
+struct VulkanSubresourceView
 {
-    if (image == VK_NULL_HANDLE || commandBuffer == VK_NULL_HANDLE || use == target)
-        return;
+    enum class Use
+    {
+        ColorAttachment,
+        DepthAttachment,
+        Sampled,
+        Storage,
+        SampledArray,
+        DepthSlice
+    };
 
-    VkImageMemoryBarrier2 barrier = {};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    barrier.srcStageMask = use.stage;
-    barrier.srcAccessMask = use.access;
-    barrier.dstStageMask = target.stage;
-    barrier.dstAccessMask = target.access;
-    barrier.oldLayout = use.layout;
-    barrier.newLayout = target.layout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = aspect;
-    barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
-    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-
-    VkDependencyInfo dependency = {};
-    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dependency.imageMemoryBarrierCount = 1;
-    dependency.pImageMemoryBarriers = &barrier;
-
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
-
-    use = target;
-}
+    Use use = Use::ColorAttachment;
+    int level = 0;
+    int slice = 0;
+    int count = 1;
+    VkImageView view = VK_NULL_HANDLE;
+};
 
 // What Texture::nativeTexture() and nativeReadView() point to.
 struct VulkanTextureData
@@ -221,7 +186,11 @@ struct VulkanTextureData
     int height = 0;
 
     int mipLevels = 1;
-    bool cube = false;
+
+    // 2D slices (layers times six on a cube kind), and a volume's images.
+    TextureType kind = TextureType::TwoD;
+    int slices = 1;
+    int depth = 1;
 
     // The VkImage then belongs to the swapchain, and nothing samples it.
     bool presentable = false;
@@ -257,14 +226,10 @@ struct VulkanTextureData
     // Depth aspect alone: Vulkan refuses a sampled view of two aspects at once.
     VkImageView depthReadView = VK_NULL_HANDLE;
 
-    bool isValid() const
-    {
-        if (image == VK_NULL_HANDLE)
-            return false;
+    // Every view past the ones above that a pass or a kernel has asked for.
+    Vector<VulkanSubresourceView> subresourceViews;
 
-        return presentable ? attachmentView != VK_NULL_HANDLE
-                           : sampledView != VK_NULL_HANDLE;
-    }
+    bool isValid() const;
 
     bool isRenderTarget() const { return attachmentView != VK_NULL_HANDLE; }
     bool isComputeWritable() const { return storageView != VK_NULL_HANDLE; }
@@ -289,13 +254,7 @@ struct VulkanTextureData
                                                     : depthImage;
     }
 
-    const ImageUse& restingUse() const
-    {
-        if (presentable)
-            return imagePresent;
-
-        return isComputeWritable() ? imageStorage : imageSampled;
-    }
+    const ImageUse& restingUse() const;
 
     const ImageUse& depthRestingUse() const
     {
@@ -315,50 +274,29 @@ struct VulkanDrawable
     VkSemaphore acquired = VK_NULL_HANDLE;
     VkSemaphore renderFinished = VK_NULL_HANDLE;
 
+    // Whether the swapchain was created with TRANSFER_SRC, which is what
+    // Frame::copyDrawable needs (GPUView::setReadableDrawable).
+    bool readable = false;
+
     // VK_NOT_READY marks a frame that never presented.
     VkResult presentResult = VK_NOT_READY;
 };
 
-inline void transitionTextureForUse(VkCommandBuffer commandBuffer,
-                                    VulkanTextureData& data,
-                                    const ImageUse& target)
-{
-    recordImageBarrier(
-        commandBuffer, data.image, VK_IMAGE_ASPECT_COLOR_BIT, data.use, target);
-}
+void transitionTextureForUse(VkCommandBuffer commandBuffer,
+                             VulkanTextureData& data,
+                             const ImageUse& target);
 
-inline void transitionMultisampleForUse(VkCommandBuffer commandBuffer,
-                                        VulkanTextureData& data,
-                                        const ImageUse& target)
-{
-    recordImageBarrier(commandBuffer,
-                       data.msaaImage,
-                       VK_IMAGE_ASPECT_COLOR_BIT,
-                       data.msaaUse,
-                       target);
-}
+void transitionMultisampleForUse(VkCommandBuffer commandBuffer,
+                                 VulkanTextureData& data,
+                                 const ImageUse& target);
 
-inline void transitionDepthForUse(VkCommandBuffer commandBuffer,
-                                  VulkanTextureData& data,
-                                  const ImageUse& target)
-{
-    recordImageBarrier(commandBuffer,
-                       data.depthImage,
-                       depthAspectMask(data.depthHasStencil),
-                       data.depthUse,
-                       target);
-}
+void transitionDepthForUse(VkCommandBuffer commandBuffer,
+                           VulkanTextureData& data,
+                           const ImageUse& target);
 
-inline void transitionResolvedDepthForUse(VkCommandBuffer commandBuffer,
-                                          VulkanTextureData& data,
-                                          const ImageUse& target)
-{
-    recordImageBarrier(commandBuffer,
-                       data.resolvedDepthImage,
-                       depthAspectMask(data.depthHasStencil),
-                       data.resolvedDepthUse,
-                       target);
-}
+void transitionResolvedDepthForUse(VkCommandBuffer commandBuffer,
+                                   VulkanTextureData& data,
+                                   const ImageUse& target);
 
 struct VulkanRenderPassBegin
 {
@@ -370,8 +308,10 @@ struct VulkanRenderPassBegin
     Vector<VkClearValue> clearValues;
 };
 
-VulkanRenderPassBegin prepareVulkanRenderPass(const VkRenderingInfo& rendering,
-                                              const VulkanTextureData& data);
+VulkanRenderPassBegin
+    prepareVulkanRenderPass(const VkRenderingInfo& rendering,
+                            std::span<VulkanTextureData* const> targets,
+                            VkFormat depthFormat);
 
 void beginVulkanRenderPass(VkCommandBuffer commandBuffer,
                            const VulkanRenderPassBegin& begin);
@@ -383,6 +323,41 @@ VkImageView makeVulkanImageView(VkDevice device,
                                 VkImageAspectFlags aspect,
                                 int levels,
                                 int layers);
+
+// The same from a base level and layer.
+VkImageView makeVulkanImageView(VkDevice device,
+                                VkImage image,
+                                VkFormat viewFormat,
+                                VkImageViewType type,
+                                VkImageAspectFlags aspect,
+                                int baseLevel,
+                                int levels,
+                                int baseLayer,
+                                int layers);
+
+// Where a pass into `count` layers from `slice` of `level` draws and tests:
+// the views made with the target for level 0 of slice 0, and a view made on
+// first use otherwise, kept in subresourceViews. A volume's layers are its
+// images at that level. Null when the view cannot be made.
+VkImageView
+    vulkanColorTargetView(VulkanTextureData& data, int level, int slice, int count);
+VkImageView
+    vulkanDepthTargetView(VulkanTextureData& data, int level, int slice, int count);
+
+// One level and every slice, as the kind's sampled or storage view type.
+VkImageView vulkanLevelView(VulkanTextureData& data, bool storage, int level);
+
+// One level of a cube or a cube array, every slice, sampled as a 2D array.
+// Null on any other kind; a storage view of a cube is a 2D array already.
+VkImageView vulkanSampledArrayView(VulkanTextureData& data, int level);
+
+// Level 0 of one slice of the sampleable depth plane as a 2D view, for the
+// ...DepthTextureSlice binds; depthReadView for slice 0 of a 2D target. Null
+// without sampleableDepth or for a slice the plane lacks.
+VkImageView vulkanDepthSliceView(VulkanTextureData& data, int slice);
+
+// Hands every view in subresourceViews to `context`'s deferred release.
+void releaseVulkanSubresourceViews(VulkanContext& context, VulkanTextureData& data);
 
 // False means the caller must refuse the target.
 bool createVulkanMultisampleCompanion(VulkanContext& context,
@@ -409,21 +384,9 @@ struct VulkanTextureBindings
 
     VkDescriptorType typeAt(int slot) const { return types[slot]; }
 
-    void add(int slot, VkDescriptorType type)
-    {
-        if (slot < 0 || slot >= maxTextureSlots)
-            return;
+    void add(int slot, VkDescriptorType type);
 
-        declared |= 1u << slot;
-        types[slot] = type;
-    }
-
-    void merge(const VulkanTextureBindings& other)
-    {
-        for (auto slot = 0; slot < maxTextureSlots; ++slot)
-            if (other.has(slot))
-                add(slot, other.typeAt(slot));
-    }
+    void merge(const VulkanTextureBindings& other);
 
     std::uint32_t declared = 0;
     VkDescriptorType types[maxTextureSlots] = {};
@@ -436,6 +399,7 @@ VulkanTextureBindings spirvTextureBindings(const Vector<std::uint32_t>& words,
 
 // Built per pipeline; a kernel declaring no texture uses VulkanShared's.
 PipelineLayouts makeComputeLayouts(VkDevice device,
+                                   int bufferSlots,
                                    const VulkanTextureBindings& textures);
 
 // Pointed to by ShaderLibrary::nativeLibrary().
@@ -462,16 +426,7 @@ struct VulkanComputePipeline
 // block at binding 0; binding different bytes per stage needs a second number.
 struct VulkanRenderPipeline
 {
-    std::uint32_t strideForSlot(int slot) const
-    {
-        if (slot >= 0 && slot < strides.size())
-            return strides[slot];
-
-        if (!strides.empty())
-            return strides[0];
-
-        return 0;
-    }
+    std::uint32_t strideForSlot(int slot) const;
 
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -488,7 +443,8 @@ struct VulkanRenderPipeline
     bool depth = false;
     bool stencil = false;
     int sampleCount = 1;
-    VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+    int colorCount = 1;
+    std::array<VkFormat, maxColorAttachments> colorFormats {};
 };
 
 struct VulkanComputeEncoder
@@ -504,7 +460,10 @@ struct VulkanComputeEncoder
 struct VulkanRenderEncoder
 {
     CommandContext* commands = nullptr;
-    VulkanTextureData* target = nullptr;
+
+    // Every colour target of the pass, the first being the one whose depth is
+    // attached; each goes back to its resting use when the pass ends.
+    Vector<VulkanTextureData*> targets;
 
     int targetWidth = 0;
     int targetHeight = 0;
@@ -513,154 +472,44 @@ struct VulkanRenderEncoder
 
     VkQueryPool queryPool = VK_NULL_HANDLE;
     int endQuery = -1;
+
+    // The target whose depth plane is attached: targets[0], or the pass's
+    // DepthTarget. Its plane goes back to its resting use with the colours.
+    VulkanTextureData* depthTarget = nullptr;
 };
 
-inline void recordPassEndTimestamp(CommandContext* commands,
-                                   VkQueryPool queryPool,
-                                   int endQuery)
-{
-    if (queryPool == VK_NULL_HANDLE || endQuery < 0 || commands == nullptr)
-        return;
-
-    vkCmdWriteTimestamp2(commands->buffer,
-                         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-                         queryPool,
-                         static_cast<std::uint32_t>(endQuery));
-}
+void recordPassEndTimestamp(CommandContext* commands,
+                            VkQueryPool queryPool,
+                            int endQuery);
 
 // A storage-buffer bind, whole or ranged: the shader's element zero is the
 // element at the offset. The alignment the descriptor demands is a device limit
 // (16 on lavapipe) rather than the four bytes Metal and D3D12 take, which is
 // what Device::storageBufferOffsetAlignment reports; an offset off that grid
 // binds nothing, as one at or past the end does.
-inline VkDescriptorBufferInfo vulkanStorageBufferInfo(const VulkanBufferData* data,
-                                                      const BufferRange& range)
-{
-    if (data == nullptr || data->buffer == VK_NULL_HANDLE || range.offset < 0
-        || static_cast<std::size_t>(range.offset) >= data->size)
-        return {};
+VkDescriptorBufferInfo vulkanStorageBufferInfo(const VulkanBufferData* data,
+                                               const BufferRange& range);
 
-    const auto offset = static_cast<VkDeviceSize>(range.offset);
-    const auto alignment =
-        getVulkanShared().getProperties().limits.minStorageBufferOffsetAlignment;
+void endTimedPass(const VulkanComputeEncoder& encoder);
 
-    if (alignment != 0 && offset % alignment != 0)
-        return {};
-
-    return {data->buffer, offset, VK_WHOLE_SIZE};
-}
-
-inline void endTimedPass(const VulkanComputeEncoder& encoder)
-{
-    recordPassEndTimestamp(encoder.commands, encoder.queryPool, encoder.endQuery);
-}
-
-inline void endTimedPass(const VulkanRenderEncoder& encoder)
-{
-    recordPassEndTimestamp(encoder.commands, encoder.queryPool, encoder.endQuery);
-}
+void endTimedPass(const VulkanRenderEncoder& encoder);
 
 // First use in a recording is free: every recording ends with a global barrier.
-inline void transitionForUse(CommandContext& commands,
-                             VulkanBufferData& data,
-                             const BufferUse& target)
-{
-    if (data.buffer == VK_NULL_HANDLE)
-        return;
-
-    if (data.recordingId != commands.recordingId)
-    {
-        data.recordingId = commands.recordingId;
-        data.use = target;
-        return;
-    }
-
-    if (data.use == target)
-        return;
-
-    VkBufferMemoryBarrier2 barrier = {};
-    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-    barrier.srcStageMask = data.use.stage;
-    barrier.srcAccessMask = data.use.access;
-    barrier.dstStageMask = target.stage;
-    barrier.dstAccessMask = target.access;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.buffer = data.buffer;
-    barrier.size = VK_WHOLE_SIZE;
-
-    VkDependencyInfo dependency = {};
-    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dependency.bufferMemoryBarrierCount = 1;
-    dependency.pBufferMemoryBarriers = &barrier;
-
-    vkCmdPipelineBarrier2(commands.buffer, &dependency);
-
-    data.use = target;
-}
+void transitionForUse(CommandContext& commands,
+                      VulkanBufferData& data,
+                      const BufferUse& target);
 
 // Tracking without recording: a buffer barrier inside a render pass is illegal,
 // and barrierBeforeRendering has already ordered everything the pass can bind.
-inline void noteBufferUse(CommandContext& commands,
-                          VulkanBufferData& data,
-                          const BufferUse& target)
-{
-    if (data.buffer == VK_NULL_HANDLE)
-        return;
-
-    data.recordingId = commands.recordingId;
-    data.use = target;
-}
+void noteBufferUse(CommandContext& commands,
+                   VulkanBufferData& data,
+                   const BufferUse& target);
 
 // Barriers being illegal inside a render pass, this covers everything one may
 // bind - attachment stages included, two passes into one target ordering nothing.
-inline void barrierBeforeRendering(VkCommandBuffer commandBuffer)
-{
-    constexpr auto attachmentStages = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT
-                                      | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
-                                      | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-
-    VkMemoryBarrier2 barrier = {};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT
-                           | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                           | attachmentStages;
-    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT
-                            | VK_ACCESS_2_SHADER_WRITE_BIT
-                            | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
-                            | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    barrier.dstStageMask =
-        VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT
-        | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
-        | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | attachmentStages;
-    barrier.dstAccessMask =
-        VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-
-    VkDependencyInfo dependency = {};
-    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dependency.memoryBarrierCount = 1;
-    dependency.pMemoryBarriers = &barrier;
-
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
-}
+void barrierBeforeRendering(VkCommandBuffer commandBuffer);
 
 // Global rather than per resource: the pass does not know what the kernel wrote.
-inline void barrierAfterDispatch(VkCommandBuffer commandBuffer)
-{
-    VkMemoryBarrier2 barrier = {};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    barrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    barrier.dstAccessMask =
-        VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-
-    VkDependencyInfo dependency = {};
-    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dependency.memoryBarrierCount = 1;
-    dependency.pMemoryBarriers = &barrier;
-
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
-}
+void barrierAfterDispatch(VkCommandBuffer commandBuffer);
 
 } // namespace eacp::GPU

@@ -39,7 +39,9 @@ set(gpu_test_sources
         CommandBufferTimingTests.cpp
         CommandBufferWaitTests.cpp
         CompressedTextureTests.cpp
+        CopyTests.cpp
         ComputeBufferRangeTests.cpp
+        ComputeBufferSlotTests.cpp
         ConcurrentPassTests.cpp
         CoordinateSpaceTests.cpp
         CubeTextureTests.cpp
@@ -49,6 +51,10 @@ set(gpu_test_sources
         DevicePresenceTests.cpp
         Dispatch3DTests.cpp
         ExternalGeometryTests.cpp
+        FormatTargetTests.cpp
+        TextureFormatTests.cpp
+        DrawableCopyTests.cpp
+        MultiViewFrameTests.cpp
         FrameComputeTests.cpp
         FrameTimingTests.cpp
         GPUSmokeTests.cpp
@@ -56,13 +62,18 @@ set(gpu_test_sources
         GroupReductionTests.cpp
         HoistingTests.cpp
         IndirectDispatchTests.cpp
+        IndirectDrawTests.cpp
         InPlaceComputeTests.cpp
         InPlaceRecordTests.cpp
         IntrinsicTests.cpp
+        KernelImageTests.cpp
         LargeBufferTests.cpp
         MipmapTests.cpp
         MultiDeviceTests.cpp
         MultisampledTargetTests.cpp
+        MipGenerationTests.cpp
+        MultiTargetTests.cpp
+        OcclusionQueryTests.cpp
         PackedBFloat16Tests.cpp
         PackedHalfTests.cpp
         PackedQuantizedTests.cpp
@@ -72,6 +83,7 @@ set(gpu_test_sources
         RenderBufferRangeTests.cpp
         RenderTargetDepthTests.cpp
         RenderTargetTests.cpp
+        SamplerTests.cpp
         ScissorTests.cpp
         SelectTests.cpp
         ShaderBlendTests.cpp
@@ -83,10 +95,12 @@ set(gpu_test_sources
         StorePlacementTests.cpp
         StreamedRangeDrawTests.cpp
         StreamingBufferTests.cpp
+        SubresourceTargetTests.cpp
         SuppliedMipChainTests.cpp
         TextureCreationTests.cpp
         TextureReadTests.cpp
         TextureRegionTests.cpp
+        TextureArrayTests.cpp
         TextureSamplingTests.cpp
         TextureUpdateTests.cpp
         ThreadGroupSizeTests.cpp
@@ -96,6 +110,8 @@ set(gpu_test_sources
         UIntScalarTests.cpp
         UIntVectorTests.cpp
         VertexFormatTests.cpp
+        VertexOnlyPipelineTests.cpp
+        VertexTextureTests.cpp
         ViewportTests.cpp
         TestMain.cpp)
 

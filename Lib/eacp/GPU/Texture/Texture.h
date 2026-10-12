@@ -1,8 +1,10 @@
 #pragma once
 
+#include "../CommandBuffer/Copy.h"
 #include "../Common.h"
 
 #include <cstddef>
+#include <span>
 
 namespace eacp::GPU
 {
@@ -48,6 +50,108 @@ enum class TextureFormat
     // RGBA32Float says so.
     R32Float,
 
+    // The rest of the shapes a kernel or a pass produces a measurement in, each
+    // at the size it names: a half or a full float per channel, one 16-bit
+    // unsigned normalised channel, one 32-bit unsigned integer. What an
+    // ambient-occlusion chain, a hi-Z pyramid, a motion-vector or an id buffer
+    // is kept in, at the memory and precision it was designed for rather than
+    // widened into four channels or into a full float.
+    //
+    // R16Float samples as (r, 0, 0, 1) and RG16Float as (r, g, 0, 1), and both
+    // filter everywhere, as RGBA16Float does. RG32Float filters nowhere it is
+    // promised to, like the other full floats. R16Unorm is R8Unorm with 65536
+    // steps rather than 256: a height map, a 16-bit depth copy.
+    //
+    // R32Uint is an *integer* texture: the shader declares it texture2d<uint>,
+    // Texture2D<uint> or usampler2D/uimage2D and reads it with read(), Load or
+    // texelFetch, never through a filtering sample, and a pass rendering into
+    // one writes a uint. It has no mip chain eacp could average - an id is not
+    // a number to take a mean of - so `mipmapped` gives it one level, exactly
+    // as it does a compressed format.
+    R16Float,
+    RG16Float,
+    RG32Float,
+    R16Unorm,
+    R32Uint,
+
+    // sRGB: the same bytes as RGBA8Unorm and BGRA8Unorm, stored as sRGB-encoded
+    // colour rather than as numbers. A shader sampling one gets *linear* light -
+    // the sampler decodes before it filters - and a pass rendering into one
+    // writes linear light that the hardware encodes on the way out, blending in
+    // linear first. Which is the only way a lit scene comes out with the right
+    // gamma: lighting is arithmetic on light, and an 8-bit target holding the
+    // light itself spends its 256 steps where the eye cannot tell them apart and
+    // bands where it can.
+    //
+    // read() and update() move the encoded bytes, untouched in both
+    // directions. A kernel cannot write one (Device::supportsComputeWrite
+    // refuses every sRGB format: no API promises a typed store that encodes).
+    // A chain eacp builds on the CPU is averaged in linear light - decoded,
+    // averaged, encoded - which is what every GPU's own generator does with
+    // these formats and why they look right at distance.
+    RGBA8UnormSrgb,
+    BGRA8UnormSrgb,
+
+    // Sixteen bits per channel, unsigned normalised: R16Unorm's two- and
+    // four-channel shapes. A normal map or a motion buffer that eight bits
+    // band, a 16-bit PNG.
+    RG16Unorm,
+    RGBA16Unorm,
+
+    // Packed into 32 bits. RGB10A2Unorm is ten bits of red, green and blue and
+    // two of alpha, red in the lowest bits of the little-endian word (DXGI's
+    // R10G10B10A2, Vulkan's A2B10G10R10_PACK32 - one layout under two names).
+    // RG11B10Float is three *unsigned* floats with a five-bit exponent and six,
+    // six and five bits of mantissa, red lowest again: an HDR colour at half
+    // the cost of RGBA16Float, and the shape a lit scene's intermediate target
+    // is usually kept in. Neither has a sign; a negative value written to
+    // RG11B10Float is stored as 0. Both filter and render everywhere.
+    RGB10A2Unorm,
+    RG11B10Float,
+
+    // Three unsigned floats sharing one exponent: nine bits of mantissa each
+    // for red, green and blue (red lowest) and a five-bit exponent at the top
+    // of the word, bias 15 - DXGI's R9G9B9E5_SHAREDEXP, Vulkan's
+    // E5B9G9R9_UFLOAT_PACK32, Metal's RGB9E5Float. HDR colour at a quarter of
+    // RGBA32Float's cost with more mantissa than RG11B10Float, at the price of
+    // a channel far darker than the brightest losing its low bits: a light
+    // probe, an irradiance map, a baked environment. Samples with an alpha of
+    // 1 and filters everywhere.
+    //
+    // **A sampled format only.** No API promises to render into it (Metal
+    // does on Apple GPUs and not on the Mac2 family, D3D12 and Vulkan never),
+    // nor a kernel to store to it, so a renderTarget or a computeWrite texture
+    // in it is invalid, as a block format's is, and it has no PixelFormat;
+    // isRenderableFormat says so. Uploaded, updated, read back and copied like
+    // any 32-bit format, and `mipmapped` builds its chain on the CPU through
+    // float; generateMipmaps refuses it (supportsMipGeneration), the GPU's
+    // generators wanting a format they can render into.
+    RGB9E5Float,
+
+    // The integer formats beside R32Uint, each read as integers - texture2d<uint>
+    // or texture2d<int>, Texture2D<uint4> or Texture2D<int4>, usampler2D or
+    // isampler2D - with read(), Load or texelFetch rather than a filtering
+    // sample, rendered into by a pass whose fragment returns uint or int, and
+    // never blended or mipmapped. An 8-bit Uint is the stored number, not a
+    // fraction of 255; a Sint is two's complement.
+    R8Uint,
+    RG8Uint,
+    RGBA8Uint,
+    R16Uint,
+    RG16Uint,
+    RGBA16Uint,
+    RG32Uint,
+    RGBA32Uint,
+    R8Sint,
+    RG8Sint,
+    RGBA8Sint,
+    R16Sint,
+    RG16Sint,
+    RGBA16Sint,
+    R32Sint,
+    RG32Sint,
+    RGBA32Sint,
+
     // Block-compressed: a 4x4 block of texels stored as one 8- or 16-byte
     // record that the sampler decodes on its way out. The picture costs a
     // quarter or an eighth of what it does uncompressed - in memory, over the
@@ -69,7 +173,14 @@ enum class TextureFormat
     // alpha endpoints and a three-bit index. BC7 is 16 and is the modern one -
     // eight modes, and near-lossless where the older three band visibly.
     //
-    // No sRGB variants, because eacp has no sRGB formats at all.
+    // Each of the four has an sRGB twin, the same blocks decoded to linear
+    // light on the way out, for the reason RGBA8UnormSrgb gives. BC4 is BC3's
+    // alpha half on its own - 8 bytes, one channel - and BC5 two of them, 16
+    // bytes, which is what a tangent-space normal map is compressed into; each
+    // comes unsigned (0..1) and signed (-1..1). BC6H is 16 bytes of unsigned
+    // half-float RGB, the HDR one - an environment map, a baked light probe.
+    // BC4 samples as (r, 0, 0, 1), BC5 as (r, g, 0, 1), BC6H with an alpha of
+    // 1.
     //
     // **What a compressed texture cannot be**, refused rather than
     // half-supported and in the same words on both backends: a renderTarget or
@@ -89,133 +200,130 @@ enum class TextureFormat
     BC1RGBA,
     BC2RGBA,
     BC3RGBA,
-    BC7RGBA
+    BC7RGBA,
+    BC1RGBASrgb,
+    BC2RGBASrgb,
+    BC3RGBASrgb,
+    BC7RGBASrgb,
+    BC4RUnorm,
+    BC4RSnorm,
+    BC5RGUnorm,
+    BC5RGSnorm,
+    BC6HRGBUfloat
 };
+
+// What a format's texels are, as the shader sees them once they are sampled
+// or read: a fraction (Unorm 0..1, Snorm -1..1), a float, or an integer. The
+// last two pick the shader's declaration - texture2d<float>, <uint> or <int>.
+enum class TextureFormatKind
+{
+    Unorm,
+    Snorm,
+    Float,
+    Uint,
+    Sint
+};
+
+// Everything the helpers below answer, in one place. texelBytes is 0 on a
+// block-compressed format and blockBytes 0 on every other one; channels is how
+// many components a texel carries (a BC1 block decodes to four).
+struct TextureFormatTraits
+{
+    int texelBytes = 0;
+    int blockBytes = 0;
+    int channels = 0;
+    TextureFormatKind kind = TextureFormatKind::Unorm;
+    bool srgb = false;
+};
+
+// Exhaustive on purpose, and the only switch over every format in Texture.cpp:
+// a format added without its traits is a -Wswitch warning there rather than a
+// texture uploaded at someone else's stride. bytesPerPixel answered 4 for
+// anything it did not recognise until the block formats arrived, which is a
+// wrong number rather than a missing case.
+TextureFormatTraits textureFormatTraits(TextureFormat format);
 
 // Whether one record of this format covers a 4x4 block of texels rather than a
 // single one. The formats that do are sized differently from the rest all the
 // way down, which is what levelBytesPerRow and levelBytes below exist to hide
 // from everything that only wants the size of a level.
-constexpr bool isCompressedFormat(TextureFormat format)
-{
-    return format == TextureFormat::BC1RGBA || format == TextureFormat::BC2RGBA
-           || format == TextureFormat::BC3RGBA || format == TextureFormat::BC7RGBA;
-}
+bool isCompressedFormat(TextureFormat format);
+
+// Whether a pass can render into this format and a kernel can be asked to
+// store to it: every format but the block-compressed ones and RGB9E5Float,
+// which are sampled only. Each such format has its PixelFormat
+// (pixelFormatFor), and textureFormatFor is its way back.
+bool isRenderableFormat(TextureFormat format);
 
 // Bytes one 4x4 block occupies, and 0 for a format that has no blocks. Both
 // APIs round a level up to whole blocks, so a 2x2 level of a compressed texture
 // is still one block of this size and a 1x1 level is too.
-constexpr int bytesPerBlock(TextureFormat format)
-{
-    switch (format)
-    {
-        case TextureFormat::BC1RGBA:
-            return 8;
-
-        case TextureFormat::BC2RGBA:
-        case TextureFormat::BC3RGBA:
-        case TextureFormat::BC7RGBA:
-            return 16;
-
-        case TextureFormat::RGBA8Unorm:
-        case TextureFormat::BGRA8Unorm:
-        case TextureFormat::R8Unorm:
-        case TextureFormat::RG8Unorm:
-        case TextureFormat::RGBA16Float:
-        case TextureFormat::RGBA32Float:
-        case TextureFormat::R32Float:
-            break;
-    }
-
-    return 0;
-}
+int bytesPerBlock(TextureFormat format);
 
 // Bytes one texel occupies, and 0 for a block-compressed format, which has no
 // per-texel size at all - levelBytesPerRow is the number a compressed upload
 // wants.
-//
-// Exhaustive on purpose. This answered 4 for anything it did not recognise
-// until the block formats arrived, which is a wrong number rather than a
-// missing case: a format added without a size here is now a -Wswitch warning
-// instead of a texture uploaded at someone else's stride.
-constexpr int bytesPerPixel(TextureFormat format)
-{
-    switch (format)
-    {
-        case TextureFormat::R8Unorm:
-            return 1;
+int bytesPerPixel(TextureFormat format);
 
-        case TextureFormat::RG8Unorm:
-            return 2;
-
-        case TextureFormat::RGBA8Unorm:
-        case TextureFormat::BGRA8Unorm:
-        case TextureFormat::R32Float:
-            return 4;
-
-        case TextureFormat::RGBA16Float:
-            return 8;
-
-        case TextureFormat::RGBA32Float:
-            return 16;
-
-        case TextureFormat::BC1RGBA:
-        case TextureFormat::BC2RGBA:
-        case TextureFormat::BC3RGBA:
-        case TextureFormat::BC7RGBA:
-            break;
-    }
-
-    return 0;
-}
+// How many components a texel carries: what a shader reading it gets in
+// r, rg, rgb or rgba, the rest being 0 and an alpha of 1.
+int formatChannels(TextureFormat format);
 
 // A level's row pitch when it is tightly packed: bytes per row of texels, or
 // bytes per row of *blocks* for a compressed format, where one row covers four
 // rows of texels.
-constexpr int levelBytesPerRow(TextureFormat format, int width)
-{
-    if (isCompressedFormat(format))
-        return ((width + 3) / 4) * bytesPerBlock(format);
-
-    return width * bytesPerPixel(format);
-}
+int levelBytesPerRow(TextureFormat format, int width);
 
 // How many rows of that pitch a level holds: its height in texels, or in blocks
 // of four.
-constexpr int levelRows(TextureFormat format, int height)
-{
-    return isCompressedFormat(format) ? (height + 3) / 4 : height;
-}
+int levelRows(TextureFormat format, int height);
 
 // One level of a texture this size, tightly packed - and the unit every layout
 // in this header is written in: a whole 2D texture, one face of a cube, one
 // level of a chain the caller supplied.
-constexpr int levelBytes(TextureFormat format, int width, int height)
-{
-    return levelBytesPerRow(format, width) * levelRows(format, height);
-}
+int levelBytes(TextureFormat format, int width, int height);
 
-constexpr bool isFloatFormat(TextureFormat format)
-{
-    return format == TextureFormat::RGBA16Float
-           || format == TextureFormat::RGBA32Float
-           || format == TextureFormat::R32Float;
-}
+// Whether [origin, origin + extent) is a non-empty range inside [0, limit).
+bool isWithin(int origin, int extent, int limit);
 
-// Whether a kernel may write this format. The restriction is D3D12's: a typed
-// UAV store is only guaranteed for a small set of formats, and everything
-// outside it depends on the device. BGRA8Unorm - the drawable's own format - is
-// not in the guaranteed set, which is exactly the trap this exists to close.
+// Whether a texel holds floats: the half and full float formats, RG11B10Float,
+// RGB9E5Float and BC6H.
+bool isFloatFormat(TextureFormat format);
+
+// Whether a shader reads this format as integers rather than as floats:
+// texture2d<uint> or <int>, Texture2D<uint> or <int>, usampler2D or isampler2D.
+// Unsigned and signed alike; the two below tell them apart.
+bool isIntegerFormat(TextureFormat format);
+
+bool isUnsignedIntegerFormat(TextureFormat format);
+
+bool isSignedIntegerFormat(TextureFormat format);
+
+// Whether the sampler decodes this format from sRGB, and a pass rendering
+// into it encodes.
+bool isSrgbFormat(TextureFormat format);
+
+// The sRGB twin of a format that has one, and the format itself otherwise -
+// and the way back. Same bytes, same size, decoded differently; a caller that
+// learns late whether its content is colour or data (bgfx's sampler flag)
+// picks between them with these.
+TextureFormat srgbFormatFor(TextureFormat format);
+
+TextureFormat linearFormatFor(TextureFormat format);
+
+// Whether a kernel may write this format on **every** device eacp runs on. The
+// restriction is D3D12's: a typed UAV store is only promised for a small set,
+// and past it the answer is the device's. BGRA8Unorm - the drawable's own
+// format - is not in the set, which is exactly the trap this exists to close.
 //
-// A texture asked for computeWrite in another format fails to create rather
-// than binding as a kernel output that quietly does nothing - unless the device
-// takes it anyway, which Device::supportsComputeWrite answers per format.
-constexpr bool supportsComputeWrite(TextureFormat format)
-{
-    return format == TextureFormat::RGBA8Unorm
-           || format == TextureFormat::RGBA16Float
-           || format == TextureFormat::RGBA32Float;
-}
+// Device::supportsComputeWrite is the answer for one device, and the one a
+// texture is created against: it takes every format here and, on most
+// hardware, the one- and two-channel ones beside them, the packed ones and the
+// integer ones. Portable code that cannot ask keeps to these three.
+//
+// A texture asked for computeWrite in a format its device refuses fails to
+// create rather than binding as a kernel output that quietly does nothing.
+bool supportsComputeWrite(TextureFormat format);
 
 enum class TextureFilter
 {
@@ -255,7 +363,8 @@ enum class TextureAddressMode
 // than when a texture is bound: one shader samples one slot exactly one way.
 // A renderer that must do both - Sprites::SpriteRenderer draws smoothly scaled
 // camera frames and crisp pixel art through the same code - compiles one
-// program per configuration and picks between them.
+// program per configuration and picks between them. A hand-written shader that
+// takes its sampler per draw binds a Sampler instead (Sampler.h).
 struct TextureSampling
 {
     TextureFilter filter = TextureFilter::Nearest;
@@ -268,11 +377,26 @@ struct TextureSampling
 // caches this many MTLSamplerStates on the Device.
 constexpr int samplingConfigurations = 4;
 
-constexpr int samplingIndex(const TextureSampling& sampling)
+int samplingIndex(const TextureSampling& sampling);
+
+// The shape of a texture: one 2D image, a cube, an array of either, or a
+// volume. A shader declares the matching type - texture2d, texturecube,
+// texture2d_array, texturecube_array, texture3d in MSL; Texture2D,
+// TextureCube, Texture2DArray, TextureCubeArray, Texture3D in HLSL; sampler2D,
+// samplerCube, sampler2DArray, samplerCubeArray, sampler3D in GLSL.
+//
+// A *slice* is one 2D image of one level: a layer of an array, a face of a
+// cube (layer * 6 + face of a cube array, faces in the +X, -X, +Y, -Y, +Z, -Z
+// order TextureDescriptor::cube gives). A volume has one slice and addresses
+// its images by z instead.
+enum class TextureType
 {
-    return (sampling.filter == TextureFilter::Linear ? 2 : 0)
-           + (sampling.addressMode == TextureAddressMode::Repeat ? 1 : 0);
-}
+    TwoD,
+    Cube,
+    TwoDArray,
+    CubeArray,
+    ThreeD
+};
 
 // How the texture is created. Sampler state is deliberately absent: it comes
 // from the shader that samples the texture, as a TextureSampling declared on
@@ -290,7 +414,8 @@ struct TextureDescriptor
     // uploaded to and sampled should not pay for either.
     //
     // A render target's pixels come from the GPU, so update() is not the way to
-    // fill one and a null `pixels` is the only thing to create one with.
+    // fill one and a null `pixels` is the only thing to create one with. Only a
+    // format isRenderableFormat() takes may ask for it.
     bool renderTarget = false;
 
     // Whether a compute kernel can write into this texture - the other way its
@@ -299,11 +424,11 @@ struct TextureDescriptor
     // renderTarget is: the resource has to be created able to be one, which on
     // D3D12 also costs a UAV descriptor.
     //
-    // Only the formats Device::supportsComputeWrite() allows may ask for this,
-    // and only on a device whose driver reports a typed UAV store for the
-    // format; a texture that asks for it anywhere else is invalid rather than
-    // silently unwritable. Unlike a render target this leaves update() alone, so
-    // a kernel that accumulates can still be seeded from the CPU.
+    // Only a format Device::supportsComputeWrite() allows may ask for this -
+    // the device's own answer, which the portable supportsComputeWrite() set is
+    // always inside; a texture that asks for it anywhere else is invalid
+    // rather than silently unwritable. Unlike a render target this leaves update() alone, so a
+    // kernel that accumulates can still be seeded from the CPU.
     bool computeWrite = false;
 
     // Whether to build the full chain of half-size levels down to 1x1, so the
@@ -325,6 +450,9 @@ struct TextureDescriptor
     // chain. update() rebuilds it; update(region, ...) does not - a partial
     // upload has no way to know what the rest of the texture holds, so it
     // refreshes level 0 and leaves the levels below it as they were.
+    // Frame::generateMipmaps is the GPU's chain: from whatever level 0 holds,
+    // a pass's picture or an update, for a texture with mipLevels and no
+    // pixels as much as for one this built.
     //
     // A block-compressed format gets exactly one level whatever this says. The
     // filter averages texels and a 4x4 block is not four numbers to take a mean
@@ -332,6 +460,11 @@ struct TextureDescriptor
     // with an encoder eacp does not have. mipLevels below is how such a texture
     // gets a chain - the one its compressor already built.
     bool mipmapped = false;
+
+    // With `mipmapped`, build that chain on the GPU rather than the CPU: only
+    // level 0 is uploaded, here and on every update(). Metal only, and only for
+    // RGBA8Unorm, BGRA8Unorm, R8Unorm, RG8Unorm and RGBA16Float; anywhere else
+    // the CPU builds it as before, so the levels are the same either way.
     bool mipmapsOnDevice = false;
 
     // How many levels the pixels passed in already hold, for a caller that
@@ -358,15 +491,23 @@ struct TextureDescriptor
     // the default and becomes one way of getting a chain rather than the only
     // one.
     //
+    // On an array, a cube or a volume the block holds every level of every
+    // slice: slice-major, each slice's chain level 0 first (a cube's six faces
+    // each carry their own chain, a cube array's layers each six), and on a
+    // volume level-major, each level being its depth's worth of images.
+    //
+    // A render target or a computeWrite texture may ask for levels with null
+    // pixels: the GPU fills them, a pass at ColorTarget::level or a kernel at
+    // ComputePass::setOutputTextureLevel(texture, slot, level). Any texture may
+    // ask for them through Device::makeTextureFromSubresources, which names
+    // what it uploads and so may upload nothing yet.
+    //
     // Refused rather than reconciled, each yielding an invalid texture: with
     // `mipmapped`, which says the opposite thing about who builds the chain;
-    // above mipLevelCount(width, height), which is more levels than the size
-    // has; with null pixels, there being no chain to take and nothing to fill
-    // the levels with; on a renderTarget or a computeWrite texture, whose pixels
-    // come from the GPU so there was never a chain to hand over; and on a cube,
-    // whose faces would each carry one and where nothing here can pin which
-    // level a direction sampled. And bytesPerRow must be 0 on such a texture's
-    // update(), the levels being tightly packed by definition.
+    // above mipLevelCount of the largest extent, which is more levels than the
+    // size has; and with null pixels on a texture only the CPU fills, there
+    // being no chain to take. bytesPerRow must be 0 on such a texture's
+    // update(pixels), the levels being tightly packed by definition.
     int mipLevels = 0;
 
     // Whether a pass rendering into this texture gets a depth buffer, which is
@@ -452,16 +593,72 @@ struct TextureDescriptor
     // reads, and which way u and v run inside one.
     //
     // width and height must be equal; six faces of a rectangle is a shape
-    // neither API has. A cube asking for renderTarget or computeWrite is refused
-    // rather than half-supported, there being no way here to say which face a
-    // pass or a kernel would write. A cube may be compressed - the six faces are
-    // each levelBytes of blocks, in the same order - but not with a supplied
-    // mipLevels, for the reason that field gives.
+    // neither API has. A cube may be a renderTarget, a pass naming its face as
+    // ColorTarget::slice, or computeWrite, a kernel writing it as a 2D array of
+    // six through ComputePass::setOutputTextureAsArray. It may not be multisampled. A cube may be compressed - the six faces
+    // are each levelBytes of blocks, in the same order.
     //
     // mipmapped builds a chain per face out of that face's own pixels, which is
     // what both APIs' own generators do: no level is ever averaged across a
     // seam.
+    //
+    // The same as kind = TextureType::Cube, kept because every cube written
+    // before TextureType existed says it this way. Set with any kind but TwoD
+    // or Cube it is refused.
     bool cube = false;
+
+    // TwoD unless this is a cube (see `cube`), an array or a volume. Arrays
+    // and volumes upload and update like every other kind, slice by slice or
+    // image by image (TextureRegion), and may carry mipLevels.
+    //
+    // Refused, each yielding an invalid texture: a multisampled kind other
+    // than TwoD; a ThreeD texture that is compressed, or a renderTarget with
+    // depth, stencil or sampleableDepth (a pass renders into one z of it, a
+    // ColorTarget::slice, and no API has a 3D depth buffer); a CubeArray on a
+    // device without Device::supportsCubeArrays().
+    TextureType kind = TextureType::TwoD;
+
+    // The number of layers of a TwoDArray, or of cubes in a CubeArray, up to
+    // Device::maxTextureLayers(). 1 for every other kind.
+    int arrayLength = 1;
+
+    // The number of images of a ThreeD texture, up to
+    // Device::maxTextureSize3D() like its width and height. 1 for every other
+    // kind.
+    int volumeDepth = 1;
+};
+
+// Where an update or a read lands: one level, one slice (0 on a volume), and a
+// box inside them. A size of 0 runs from the origin to the edge of the level,
+// in all three directions; a volume's z and depth pick its images, and every
+// other kind keeps z 0 and depth 1.
+//
+// bytesPerRow is the source's stride between rows (rows of 4x4 blocks on a
+// compressed format), 0 for tightly packed; bytesPerImage the stride between a
+// volume's images, 0 for bytesPerRow times the rows. A compressed region starts
+// on the block grid and ends on it or at the edge of the level.
+struct TextureRegion
+{
+    int level = 0;
+    int slice = 0;
+    TextureOrigin origin;
+    TextureExtent size = {0, 0, 0};
+    int bytesPerRow = 0;
+    int bytesPerImage = 0;
+
+    static TextureRegion wholeLevel(int level, int slice = 0);
+};
+
+// One level of one slice of a texture's initial contents, for
+// Device::makeTextureFromSubresources. Strides as TextureRegion has
+// them. Subresources not named are left unwritten.
+struct TextureSubresource
+{
+    int level = 0;
+    int slice = 0;
+    const void* pixels = nullptr;
+    int bytesPerRow = 0;
+    int bytesPerImage = 0;
 };
 
 // A texture sampled by the fragment stage (MTLTexture on Metal, a D3D12
@@ -472,18 +669,26 @@ struct TextureDescriptor
 // **What "tightly packed" means is levelBytes of the format**, which is the
 // format's bytesPerPixel per texel for the ordinary formats and one 8- or
 // 16-byte record per 4x4 block for the compressed ones. The block is one level
-// of one face unless the descriptor asked for more: six faces in a row for a
-// cube, mipLevels levels in a row for a chain the caller built.
+// of one slice unless the descriptor asked for more: every slice in a row for a
+// cube or an array, each slice's mipLevels levels together for a chain the
+// caller built (see TextureDescriptor::mipLevels).
 //
-// Two dimensionalities, decided by TextureDescriptor::cube: a 2D image sampled
-// with a Float2, or six square faces sampled with a Float3 direction. They are
-// one class because everything below the sample is the same - one resource, one
+// Five shapes, decided by TextureDescriptor::kind: a 2D image, six square faces
+// sampled with a direction, an array of either, or a volume. They are one class
+// because everything below the sample is the same - one resource, one
 // descriptor, one upload path, one bind - and the difference lives where it is
 // actually visible, which is the shader's declaration.
 class Texture
 {
 public:
     Texture(Device& device, const TextureDescriptor& descriptor, const void* pixels);
+
+    // Created empty and filled subresource by subresource. With `mipmapped`
+    // and level 0 alone named for each slice, eacp builds every slice's chain
+    // from it; with mipLevels, the levels named are uploaded as they are.
+    Texture(Device& device,
+            const TextureDescriptor& descriptor,
+            std::span<const TextureSubresource> subresources);
 
     // Wraps an existing platform pixel buffer (a CVPixelBuffer on macOS) as a
     // sampleable texture without copying its pixels — the zero-copy path for
@@ -494,6 +699,8 @@ public:
 
     int width() const;
     int height() const;
+    TextureFormat format() const;
+
     bool isValid() const;
 
     // Whether this texture is the six-faced kind, which is what a shader
@@ -503,6 +710,20 @@ public:
     // dimension, so this is the only thing that can tell the two apart at the
     // bind.
     bool isCube() const;
+
+    TextureType kind() const;
+
+    // Layers of an array, cubes of a cube array, 1 otherwise.
+    int arrayLength() const;
+
+    // Images of a volume, 1 otherwise.
+    int volumeDepth() const;
+
+    // The 2D slices a level holds: arrayLength() times six on a cube kind,
+    // arrayLength() on a TwoDArray, 1 on TwoD and ThreeD. What
+    // TextureRegion::slice, ColorTarget::slice and TextureCopyRegion's slices
+    // index.
+    int slices() const;
 
     // Whether this texture was created able to be rendered into, which is what
     // Frame::beginPass(texture) needs and what makes an ordinary one a no-op
@@ -552,10 +773,9 @@ public:
     // bytesPerPixel), matching the padded rows capture buffers often carry. A
     // no-op on a wrapped or invalid texture, or when pixels is null.
     //
-    // On a cube this takes all six faces, in the order and layout the
-    // descriptor's `cube` describes - the same block of pixels the texture was
-    // created from. There is no way to replace one face, for the reason there
-    // is no region form below.
+    // On a cube, an array or a volume this takes every slice, in the layout the
+    // texture was created from. updateSubresource replaces one face, layer,
+    // level or box.
     //
     // On a compressed texture, or one created with TextureDescriptor::mipLevels,
     // it takes the same block the constructor took - the blocks of every level,
@@ -584,9 +804,8 @@ public:
     // source rows at the original width and silently upload skewed pixels,
     // which is far harder to spot than nothing appearing.
     //
-    // A no-op on a cube, which has six rectangles this could mean and no
-    // argument to say which. Quietly writing +X would be exactly the kind of
-    // silent wrong answer the out-of-bounds rule above exists to avoid.
+    // A no-op on any kind but TwoD, which has several rectangles this could
+    // mean and no argument to say which; updateSubresource names one.
     //
     // A no-op on a compressed texture too. A region there would have to start
     // and end on a 4x4 block boundary, so the rect a caller wrote and the rect
@@ -619,9 +838,9 @@ public:
     // put in a frame loop.
     //
     // A no-op on an invalid texture, a null dst, or a region that is not wholly
-    // inside the texture — not clamped, for the reason update() gives. Also on a
-    // cube, which has six faces and no way here to name one, exactly as the
-    // region update has not.
+    // inside the texture — not clamped, for the reason update() gives. Also on
+    // any kind but TwoD, as the region update is; readSubresource names a
+    // slice.
     //
     // And a no-op on a compressed texture. Handing back the blocks would need a
     // layout of its own and a decoder at the other end, and handing back texels
@@ -630,6 +849,17 @@ public:
     // cannot be.
     void read(void* dst, int bytesPerRow = 0) const;
     void read(const Graphics::Rect& region, void* dst, int bytesPerRow = 0) const;
+
+    // Any level of any slice, or a box of a volume's images: the whole of what
+    // the two forms above cannot name. A region that leaves the level, names a
+    // level or slice the texture lacks, or is off a compressed format's block
+    // grid is a no-op. The rest of the texture, its other levels included, is
+    // left as it was; a chain eacp built is not rebuilt.
+    //
+    // readSubresource() takes the same region, bytesPerRow and bytesPerImage
+    // describing dst, and refuses a compressed texture as read() does.
+    void updateSubresource(const TextureRegion& region, const void* pixels);
+    void readSubresource(const TextureRegion& region, void* dst) const;
 
     // Opaque native handles for cross-translation-unit use by the render pass.
     // There is no sampler handle: the render pass gets that from the sampling
@@ -659,6 +889,40 @@ public:
     // attachment is already sampleable and nativeDepthTexture is the answer -
     // and null on D3D12 for the reason above.
     void* nativeResolvedDepthTexture() const;
+
+    // A view of `levelCount` levels from `level` and `sliceCount` slices from
+    // `slice` (images of a volume: all of them), made once and kept for the
+    // texture's life: an MTLTexture on Metal, for a pass rendering to a range
+    // of layers or a kernel writing one level. Null on D3D12 and Vulkan, whose
+    // views live in the texture data nativeTexture hands back, and null for a
+    // range the texture does not have.
+    void* nativeSubresourceView(int level,
+                                int levelCount,
+                                int slice,
+                                int sliceCount) const;
+
+    // One level and every slice, as the texture's own kind: an MTLTexture view
+    // on Metal, kept for the texture's life, what ComputePass's level binds
+    // hand a kernel. The texture itself on a one-level texture, and null for a
+    // level it lacks and on D3D12 and Vulkan, whose per-level views live in
+    // the texture data.
+    void* nativeLevelView(int level) const;
+
+    // One level and every slice as a plain 2D array - a cube's six faces, a
+    // cube array's layer * 6 + face - which is what ComputePass's array binds
+    // hand a kernel that declared texture2d_array. An MTLTexture view on
+    // Metal, kept for the texture's life; null for a level the texture lacks,
+    // on a TwoD or ThreeD texture, and on D3D12 and Vulkan, whose array views
+    // live in the texture data.
+    void* nativeArrayView(int level) const;
+
+    // Level 0 of one slice of the sampleable depth plane as a plain 2D depth
+    // texture - what the ...DepthTextureSlice binds hand a shader that
+    // declared depth2d. An MTLTexture view on Metal, kept for the texture's
+    // life (the plane itself on a 2D target's slice 0); null without
+    // sampleableDepth, for a slice the plane lacks, and on D3D12 and Vulkan,
+    // whose slice views live in the texture data.
+    void* nativeDepthSliceView(int slice) const;
 
 private:
     struct Native;

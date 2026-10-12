@@ -13,6 +13,16 @@ ShaderSource makeShaderSourceFor(ShaderBackend backend, std::string sourceToUse)
 }
 } // namespace
 
+bool ThreadGroupShape::isSet() const
+{
+    return x > 0;
+}
+
+int ThreadGroupShape::threadCount() const
+{
+    return x * y * z;
+}
+
 ShaderSource ShaderSource::msl(std::string sourceToUse)
 {
     return makeShaderSourceFor(ShaderBackend::Metal, std::move(sourceToUse));
@@ -40,6 +50,12 @@ ShaderSource& ShaderSource::withFragment(std::string entry)
     return *this;
 }
 
+ShaderSource& ShaderSource::withThreadGroup(ThreadGroupShape shape)
+{
+    threadGroup = shape;
+    return *this;
+}
+
 ShaderSource& ShaderSource::withCompute(std::string entry)
 {
     computeEntry = std::move(entry);
@@ -49,6 +65,11 @@ ShaderSource& ShaderSource::withCompute(std::string entry)
 bool ShaderSource::isCompute() const
 {
     return !computeEntry.empty();
+}
+
+bool ShaderSource::hasFragment() const
+{
+    return !fragmentEntry.empty();
 }
 
 ShaderSource& ShaderSource::withBinding(ResourceBinding binding)

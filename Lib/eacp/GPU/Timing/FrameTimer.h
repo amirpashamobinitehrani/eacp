@@ -45,12 +45,19 @@ public:
     // name it when the pass begins. Null when this frame is not being timed.
     void* nativeSamples() const;
 
+    // Stops timing the frame in progress and hands back the slot it was timing
+    // into, for resume to restore: what a frame nested in another
+    // (Device::enterFrame) does, so its passes are timed by no one rather than
+    // by the frame around it.
+    int suspend();
+    void resume(int slot);
+
     // See GpuTimestamps::beginRecording.
     void beginRecording(void* nativeCommandBuffer);
 
     // The most recent frame the GPU has finished and reported. Empty - no
     // passes, and a zero frameIndex - until one has.
-    constexpr const FrameTimings& lastTimings() const { return latest; }
+    const FrameTimings& lastTimings() const;
 
     // See GpuTimestamps::isSupported. Only meaningful once a frame has begun,
     // which is what builds the timestamp resources.

@@ -7,6 +7,11 @@ bool FrameTimer::isSupported() const
     return timestamps.isSupported();
 }
 
+const FrameTimings& FrameTimer::lastTimings() const
+{
+    return latest;
+}
+
 void FrameTimer::beginFrame(std::uint64_t frameIndex, Device& device)
 {
     // Before the new frame takes a slot, so that the one it is about to take is
@@ -49,6 +54,18 @@ int FrameTimer::beginPass(std::string_view label)
     labels[passCount].assign(label);
 
     return passCount++;
+}
+
+int FrameTimer::suspend()
+{
+    const auto slot = current;
+    current = -1;
+    return slot;
+}
+
+void FrameTimer::resume(int slot)
+{
+    current = slot;
 }
 
 void FrameTimer::beginRecording(void* nativeCommandBuffer)

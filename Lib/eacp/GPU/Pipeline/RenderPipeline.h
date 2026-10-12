@@ -22,41 +22,60 @@ enum class PixelFormat
     RGBA8Unorm,
     RGBA16Float,
     RGBA32Float,
-    R32Float
+    R32Float,
+
+    // Every renderable TextureFormat (isRenderableFormat: all but the block
+    // formats and RGB9E5Float) has its attachment format. The integer
+    // ones - R32Uint and the Uint and Sint members below - are integer
+    // attachments: the fragment function returns a uint or an int of the
+    // target's width, and they take no blending. The sRGB ones encode what
+    // the fragment returns, and blend in linear light before they do.
+    R8Unorm,
+    RG8Unorm,
+    R16Float,
+    RG16Float,
+    RG32Float,
+    R16Unorm,
+    R32Uint,
+    RGBA8UnormSrgb,
+    BGRA8UnormSrgb,
+    RG16Unorm,
+    RGBA16Unorm,
+    RGB10A2Unorm,
+    RG11B10Float,
+    R8Uint,
+    RG8Uint,
+    RGBA8Uint,
+    R16Uint,
+    RG16Uint,
+    RGBA16Uint,
+    RG32Uint,
+    RGBA32Uint,
+    R8Sint,
+    RG8Sint,
+    RGBA8Sint,
+    R16Sint,
+    RG16Sint,
+    RGBA16Sint,
+    R32Sint,
+    RG32Sint,
+    RGBA32Sint
 };
 
 // Exhaustive rather than defaulted, so that a texture format added without an
 // attachment format is a -Wswitch warning here rather than a pipeline silently
-// built against RGBA8. The formats that fall through are the ones no pass can
-// render into anyway: the one- and two-channel byte formats, which PixelFormat
-// has no member for, and every block-compressed one, which cannot be a render
-// target at all.
-constexpr PixelFormat pixelFormatFor(TextureFormat format)
-{
-    switch (format)
-    {
-        case TextureFormat::RGBA8Unorm:
-            return PixelFormat::RGBA8Unorm;
-        case TextureFormat::BGRA8Unorm:
-            return PixelFormat::BGRA8Unorm;
-        case TextureFormat::RGBA16Float:
-            return PixelFormat::RGBA16Float;
-        case TextureFormat::RGBA32Float:
-            return PixelFormat::RGBA32Float;
-        case TextureFormat::R32Float:
-            return PixelFormat::R32Float;
+// built against RGBA8. The formats that fall through are the block-compressed
+// ones and RGB9E5Float, which cannot be a render target at all.
+PixelFormat pixelFormatFor(TextureFormat format);
 
-        case TextureFormat::R8Unorm:
-        case TextureFormat::RG8Unorm:
-        case TextureFormat::BC1RGBA:
-        case TextureFormat::BC2RGBA:
-        case TextureFormat::BC3RGBA:
-        case TextureFormat::BC7RGBA:
-            break;
-    }
+// The way back: the texture format an attachment format is the attachment of.
+// Total, every PixelFormat being a renderable TextureFormat, which is what
+// lets each backend map one table of native formats rather than two.
+TextureFormat textureFormatFor(PixelFormat format);
 
-    return PixelFormat::RGBA8Unorm;
-}
+// Whether a pipeline writing this attachment returns integers from its
+// fragment function, and so can take no blending.
+bool isIntegerFormat(PixelFormat format);
 
 // How the vertex stream assembles into primitives. Fixed on the pipeline
 // (D3D-style); the Metal backend reads it off the pipeline at draw time.
@@ -190,42 +209,7 @@ struct BlendState
 // through this rather than each switching on BlendMode themselves, so a
 // preset's equation is stated in one place and the two cannot drift on what a
 // preset means.
-constexpr BlendState blendStateFor(BlendMode mode)
-{
-    auto state = BlendState {};
-
-    switch (mode)
-    {
-        case BlendMode::None:
-            return state;
-
-        case BlendMode::AlphaBlend:
-            state.enabled = true;
-            state.sourceColor = BlendFactor::SourceAlpha;
-            state.destinationColor = BlendFactor::OneMinusSourceAlpha;
-            state.sourceAlpha = BlendFactor::SourceAlpha;
-            state.destinationAlpha = BlendFactor::OneMinusSourceAlpha;
-            return state;
-
-        case BlendMode::AlphaBlendOntoTransparent:
-            state.enabled = true;
-            state.sourceColor = BlendFactor::SourceAlpha;
-            state.destinationColor = BlendFactor::OneMinusSourceAlpha;
-            state.sourceAlpha = BlendFactor::One;
-            state.destinationAlpha = BlendFactor::OneMinusSourceAlpha;
-            return state;
-
-        case BlendMode::Additive:
-            state.enabled = true;
-            state.sourceColor = BlendFactor::SourceAlpha;
-            state.destinationColor = BlendFactor::One;
-            state.sourceAlpha = BlendFactor::One;
-            state.destinationAlpha = BlendFactor::One;
-            return state;
-    }
-
-    return state;
-}
+BlendState blendStateFor(BlendMode mode);
 
 // Which channels a fragment is allowed to write. Every channel by default,
 // which is where both backends start.
@@ -249,7 +233,7 @@ struct ColorWriteMask
 
     // Nothing at all - the case the additive-at-zero-alpha workaround was
     // standing in for.
-    static constexpr ColorWriteMask none() { return {false, false, false, false}; }
+    static ColorWriteMask none();
 };
 
 // Which faces the rasterizer keeps. None draws both and is the default: it is
@@ -370,6 +354,18 @@ struct StencilFace
     StencilOp pass = StencilOp::Keep;
 };
 
+// What a pipeline writes to one colour attachment of a pass over several
+// targets: the attachment's format, its blend and its write mask, each meaning
+// what the field of the same name on RenderPipelineDescriptor means for
+// attachment 0. Every attachment blends independently.
+struct ColorTargetState
+{
+    PixelFormat format = PixelFormat::RGBA8Unorm;
+    BlendMode blendMode = BlendMode::None;
+    std::optional<BlendState> blend;
+    ColorWriteMask writeMask;
+};
+
 struct RenderPipelineDescriptor
 {
     const ShaderLibrary* library = nullptr;
@@ -456,7 +452,30 @@ struct RenderPipelineDescriptor
     // than of a facing.
     unsigned char stencilReadMask = 0xff;
     unsigned char stencilWriteMask = 0xff;
+
+    // Attachments 1 and up, for a pipeline drawing into a pass over several
+    // targets (Frame::beginMultiTargetPass). Attachment 0 is colorFormat,
+    // blendMode, blend and colorWriteMask above, so a pipeline drawing into one
+    // target leaves this empty and means what it always meant. The attachment
+    // count and every format have to match the pass, as colorFormat does.
+    Vector<ColorTargetState> extraColorTargets;
+
+    int colorTargetCount() const;
+
+    // Attachment `index` as one shape, the first included.
+    ColorTargetState colorTarget(int index) const;
 };
+
+// Attachment `index` as a pipeline compiles it: as described, unless the
+// pipeline has no fragment stage, when nothing reaches any attachment and the
+// format alone is kept to match the pass.
+ColorTargetState writtenColorTarget(const RenderPipelineDescriptor& descriptor,
+                                    int index,
+                                    bool hasFragment);
+
+// The blend an attachment ends up with: the written-out equation when there is
+// one, the named mode's otherwise.
+BlendState resolvedBlend(const ColorTargetState& target);
 
 // A compiled render pipeline state (MTLRenderPipelineState on Metal). Create via
 // Device::makeRenderPipeline.

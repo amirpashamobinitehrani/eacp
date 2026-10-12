@@ -31,8 +31,8 @@ enum class ResourceKind
 // siblings spell.
 struct ThreadGroupShape
 {
-    constexpr bool isSet() const { return x > 0; }
-    constexpr int threadCount() const { return x * y * z; }
+    bool isSet() const;
+    int threadCount() const;
 
     int x = 0;
     int y = 1;
@@ -65,6 +65,9 @@ struct ShaderSource
 
     ShaderSource& withVertex(std::string entry);
 
+    // An empty entry makes a vertex-only source: the pipeline built from it has
+    // no fragment stage, so it writes depth and stencil and no colour - a depth
+    // prepass, a shadow map, an occluder pass.
     ShaderSource& withFragment(std::string entry);
 
     // Names the kernel entry point and marks this as a compute source: a library
@@ -74,14 +77,12 @@ struct ShaderSource
 
     bool isCompute() const;
 
+    bool hasFragment() const;
+
     // The group the kernel's entry point was emitted for, which is the group
     // the pass has to dispatch it in. Left unset for a hand-written source, and
     // the stock shape for the dispatch's rank is used.
-    constexpr ShaderSource& withThreadGroup(ThreadGroupShape shape)
-    {
-        threadGroup = shape;
-        return *this;
-    }
+    ShaderSource& withThreadGroup(ThreadGroupShape shape);
 
     ShaderSource& withBinding(ResourceBinding binding);
 

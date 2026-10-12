@@ -23,7 +23,8 @@ target_sources(eacp-gpu-codegen PRIVATE
         Codegen/ShaderValue.cpp
         Codegen/UniformLayout.cpp
         Pipeline/VertexLayout.cpp
-        Shader/ShaderSource.cpp)
+        Shader/ShaderSource.cpp
+        Texture/Texture.cpp)
 
 # Which dialect build() calls the native one: selection only, no backend.
 if (APPLE)
@@ -56,13 +57,21 @@ target_sources(eacp-gpu PRIVATE
         Codegen/ComputeProgram.cpp
         Codegen/ShaderProgram.cpp
         CommandBuffer/CommandBuffer.cpp
+        CommandBuffer/Copy.cpp
+        CommandBuffer/CopyPlan.cpp
         Device/Device.cpp
         Frame/ComputePass.cpp
         Frame/Frame.cpp
+        Frame/IndirectDrawPlan.cpp
+        Frame/OcclusionQueries.cpp
         Frame/RenderPass.cpp
+        Pipeline/RenderPipeline.cpp
+        Shader/ShaderLibrary.cpp
         Timing/CommandTimer.cpp
         Timing/FrameTimer.cpp
         Texture/MipChain.cpp
+        Texture/Sampler.cpp
+        Texture/TextureShape.cpp
         View/GPUView.cpp)
 
 if (APPLE)
@@ -71,9 +80,11 @@ if (APPLE)
     target_sources(eacp-gpu PRIVATE
             Buffer/Buffer-Apple.mm
             CommandBuffer/CommandBuffer-Apple.mm
+            CommandBuffer/CopyRecorder-Apple.mm
             Device/Device-Apple.mm
             Frame/ComputePass-Apple.mm
             Frame/Frame-Apple.mm
+            Frame/OcclusionQueries-Apple.mm
             Frame/RenderPass-Apple.mm
             Pipeline/ComputePipeline-Apple.mm
             Pipeline/RenderPipeline-Apple.mm
@@ -98,9 +109,11 @@ elseif (WIN32)
     target_sources(eacp-gpu PRIVATE
             Buffer/Buffer-Windows.cpp
             CommandBuffer/CommandBuffer-Windows.cpp
+            CommandBuffer/CopyRecorder-Windows.cpp
             Device/Device-Windows.cpp
             Frame/ComputePass-Windows.cpp
             Frame/Frame-Windows.cpp
+            Frame/OcclusionQueries-Windows.cpp
             Frame/RenderPass-Windows.cpp
             Pipeline/ComputePipeline-Windows.cpp
             Pipeline/RenderPipeline-Windows.cpp
@@ -108,7 +121,8 @@ elseif (WIN32)
             Texture/Texture-Windows.cpp
             Timing/GpuTimestamps-Windows.cpp
             View/GPUView-Windows.cpp
-            Windows/D3D12Context-Windows.cpp)
+            Windows/D3D12Context-Windows.cpp
+            Windows/D3D12Types-Windows.cpp)
     target_link_libraries(eacp-gpu PRIVATE
             d3d12
             dxgi
@@ -133,9 +147,11 @@ else ()
     target_sources(eacp-gpu PRIVATE
             Buffer/Buffer-Linux.cpp
             CommandBuffer/CommandBuffer-Linux.cpp
+            CommandBuffer/CopyRecorder-Linux.cpp
             Device/Device-Linux.cpp
             Frame/ComputePass-Linux.cpp
             Frame/Frame-Linux.cpp
+            Frame/OcclusionQueries-Linux.cpp
             Frame/RenderPass-Linux.cpp
             Pipeline/ComputePipeline-Linux.cpp
             Pipeline/RenderPipeline-Linux.cpp
@@ -144,7 +160,8 @@ else ()
             Timing/GpuTimestamps-Linux.cpp
             View/GPUView-Linux.cpp
             Vulkan/VulkanContext-Linux.cpp
-            Vulkan/VulkanRenderPass-Linux.cpp)
+            Vulkan/VulkanRenderPass-Linux.cpp
+            Vulkan/VulkanTypes-Linux.cpp)
 
     if (ANDROID)
         target_sources(eacp-gpu PRIVATE Vulkan/VulkanSurface-Android.cpp)

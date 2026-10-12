@@ -4,6 +4,7 @@
 
 #include "../Buffer/Buffer.h"
 #include "../Pipeline/ComputePipeline.h"
+#include "../Texture/Sampler.h"
 #include "../Windows/D3D12Types.h"
 
 // Windows/D3D12 backend. Records onto the command buffer's recording via the
@@ -161,6 +162,24 @@ void ComputePass::setInputTexture(const Texture& texture, int slot, TextureSampl
     list->SetComputeRootDescriptorTable(computeTextureSRVParam(slot), data->srv.gpu);
 }
 
+void ComputePass::setInputTexture(const Texture& texture,
+                                  int slot,
+                                  const Sampler& sampler)
+{
+    setInputTexture(texture, slot, TextureSampling {});
+
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    const auto descriptor = perBindSamplerDescriptor(sampler);
+
+    if (descriptor.ptr == 0)
+        return;
+
+    impl->encoder->commands->list->SetComputeRootDescriptorTable(
+        computeSamplerParam(slot), descriptor);
+}
+
 void ComputePass::setOutputTexture(const Texture& texture, int slot)
 {
     if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
@@ -175,6 +194,206 @@ void ComputePass::setOutputTexture(const Texture& texture, int slot)
 
     transitionTextureForUse(list, *data, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     list->SetComputeRootDescriptorTable(computeTextureUAVParam(slot), data->uav.gpu);
+}
+
+namespace
+{
+// The level's own view where the texture has several, the whole one where it
+// has only the one; empty for a level it lacks.
+D3D12_GPU_DESCRIPTOR_HANDLE levelView(const Vector<DescriptorSlot>& levels,
+                                      const DescriptorSlot& whole,
+                                      int level)
+{
+    if (levels.empty())
+        return level == 0 ? whole.gpu : D3D12_GPU_DESCRIPTOR_HANDLE {};
+
+    if (level < 0 || level >= (int) levels.size())
+        return {};
+
+    return levels[level].gpu;
+}
+} // namespace
+
+// Whole-resource state tracking, so a read of one level and a write of
+// another of the same texture in one pass leave it in whichever state the
+// later bind asked for: see ComputePass::setInputTextureLevel.
+void ComputePass::setInputTextureLevel(const Texture& texture,
+                                       int slot,
+                                       int level,
+                                       TextureSampling)
+{
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    auto* data = static_cast<D3D12TextureData*>(texture.nativeTexture());
+
+    if (data == nullptr)
+        return;
+
+    const auto view = levelView(data->levelSrvs, data->srv, level);
+
+    if (view.ptr == 0)
+        return;
+
+    auto* list = impl->encoder->commands->list.get();
+
+    transitionTextureForUse(
+        list, *data, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    list->SetComputeRootDescriptorTable(computeTextureSRVParam(slot), view);
+}
+
+void ComputePass::setOutputTextureLevel(const Texture& texture, int slot, int level)
+{
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    auto* data = static_cast<D3D12TextureData*>(texture.nativeTexture());
+
+    if (data == nullptr || !data->isComputeWritable())
+        return;
+
+    const auto view = levelView(data->levelUavs, data->uav, level);
+
+    if (view.ptr == 0)
+        return;
+
+    auto* list = impl->encoder->commands->list.get();
+
+    transitionTextureForUse(list, *data, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    list->SetComputeRootDescriptorTable(computeTextureUAVParam(slot), view);
+}
+
+namespace
+{
+bool isCubeKind(TextureType kind)
+{
+    return kind == TextureType::Cube || kind == TextureType::CubeArray;
+}
+} // namespace
+
+// A cube's resource is a 2D array already; only its read view is a cube, so
+// the array read is a view of its own and the array write is the level's UAV.
+void ComputePass::setInputTextureAsArray(const Texture& texture,
+                                         int slot,
+                                         int level,
+                                         TextureSampling sampling)
+{
+    if (texture.kind() == TextureType::TwoDArray)
+    {
+        setInputTextureLevel(texture, slot, level, sampling);
+        return;
+    }
+
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots
+        || !isCubeKind(texture.kind()))
+        return;
+
+    auto* data = static_cast<D3D12TextureData*>(texture.nativeTexture());
+
+    if (data == nullptr || level < 0 || level >= (int) data->arraySrvs.size()
+        || data->arraySrvs[level].gpu.ptr == 0)
+        return;
+
+    auto* list = impl->encoder->commands->list.get();
+
+    transitionTextureForUse(
+        list, *data, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    list->SetComputeRootDescriptorTable(computeTextureSRVParam(slot),
+                                        data->arraySrvs[level].gpu);
+}
+
+void ComputePass::setOutputTextureAsArray(const Texture& texture,
+                                          int slot,
+                                          int level)
+{
+    if (texture.kind() == TextureType::TwoDArray || isCubeKind(texture.kind()))
+        setOutputTextureLevel(texture, slot, level);
+}
+
+// The depth resource leaves DEPTH_WRITE for the read, as it does for a
+// fragment-stage bind, and Frame::beginPass brings it back for the next pass
+// that attaches it.
+void ComputePass::setInputDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       TextureSampling)
+{
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    auto* data = static_cast<D3D12TextureData*>(renderTarget.nativeTexture());
+
+    if (data == nullptr || !data->hasSampleableDepth()
+        || data->depthSrv.gpu.ptr == 0)
+        return;
+
+    auto* list = impl->encoder->commands->list.get();
+
+    transitionDepthForUse(
+        list, *data, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    list->SetComputeRootDescriptorTable(computeTextureSRVParam(slot),
+                                        data->depthSrv.gpu);
+}
+
+void ComputePass::setInputDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       const Sampler& sampler)
+{
+    setInputDepthTexture(renderTarget, slot, TextureSampling {});
+
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    const auto descriptor = perBindSamplerDescriptor(sampler);
+
+    if (descriptor.ptr == 0)
+        return;
+
+    impl->encoder->commands->list->SetComputeRootDescriptorTable(
+        computeSamplerParam(slot), descriptor);
+}
+
+void ComputePass::setInputDepthTextureSlice(const Texture& renderTarget,
+                                            int slice,
+                                            int slot,
+                                            TextureSampling)
+{
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    auto* data = static_cast<D3D12TextureData*>(renderTarget.nativeTexture());
+
+    if (data == nullptr || !data->hasSampleableDepth())
+        return;
+
+    const auto view = data->depthSliceView(slice);
+
+    if (view.ptr == 0)
+        return;
+
+    auto* list = impl->encoder->commands->list.get();
+
+    transitionDepthForUse(
+        list, *data, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    list->SetComputeRootDescriptorTable(computeTextureSRVParam(slot), view);
+}
+
+void ComputePass::setInputDepthTextureSlice(const Texture& renderTarget,
+                                            int slice,
+                                            int slot,
+                                            const Sampler& sampler)
+{
+    setInputDepthTextureSlice(renderTarget, slice, slot, TextureSampling {});
+
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    const auto descriptor = perBindSamplerDescriptor(sampler);
+
+    if (descriptor.ptr == 0)
+        return;
+
+    impl->encoder->commands->list->SetComputeRootDescriptorTable(
+        computeSamplerParam(slot), descriptor);
 }
 
 void ComputePass::setBytes(const void* data, std::int64_t bytes, int slot)
