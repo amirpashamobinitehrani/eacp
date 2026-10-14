@@ -8,23 +8,10 @@ using namespace nano;
 using eacp::HTTP::Request;
 using eacp::HTTP::Response;
 using eacp::HTTP::Server;
-using eacp::Threads::callAsync;
-using eacp::Threads::stopEventLoop;
 
 namespace
 {
-std::string baseUrl(int port)
-{
-    return "http://127.0.0.1:" + std::to_string(port);
-}
-
-std::string tempPath(const std::string& name)
-{
-    auto path = std::filesystem::temp_directory_path() / ("eacp-agent-" + name);
-    auto ec = std::error_code();
-    std::filesystem::remove(path, ec);
-    return path.string();
-}
+constexpr auto agentBudget = eacp::Time::MS {10000};
 
 struct AgentRecordingServer
 {
@@ -61,31 +48,6 @@ struct AgentRecordingServer
     std::vector<std::string> agents;
 };
 
-bool runOffTheLoop(Server& server, const std::function<void()>& work)
-{
-    auto worker = std::thread();
-
-    auto startWorker = [&]
-    {
-        auto runAndStop = [&]
-        {
-            work();
-            callAsync([] { stopEventLoop(); });
-        };
-
-        worker = std::thread(runAndStop);
-    };
-
-    auto stopped =
-        eacp::Threads::runEventLoopFor(eacp::Time::MS {10000}, startWorker);
-
-    if (worker.joinable())
-        worker.join();
-
-    server.stop();
-    return stopped;
-}
-
 std::string agentSeenFor(const Request& req)
 {
     auto host = AgentRecordingServer();
@@ -95,7 +57,8 @@ std::string agentSeenFor(const Request& req)
     sent.url = host.url();
 
     auto res = Response();
-    check(runOffTheLoop(host.server, [&] { res = sent.perform(); }));
+    check(runOffTheLoop([&] { res = sent.perform(); }, agentBudget));
+    host.server.stop();
     check(res.statusCode == 200);
 
     return host.lastAgent();
@@ -109,10 +72,11 @@ std::string agentSeenDownloading(const Request& req)
     auto sent = req;
     sent.url = host.url();
 
-    auto path = tempPath("download.bin");
+    auto path = tempPath("agent-download.bin");
     auto res = Response();
 
-    check(runOffTheLoop(host.server, [&] { res = sent.downloadTo(path); }));
+    check(runOffTheLoop([&] { res = sent.downloadTo(path); }, agentBudget));
+    host.server.stop();
     check(res.statusCode == 200);
 
     auto ec = std::error_code();

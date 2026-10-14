@@ -17,37 +17,12 @@ using eacp::HTTP::DownloadProgress;
 using eacp::HTTP::Request;
 using eacp::HTTP::Response;
 using eacp::HTTP::Server;
-using eacp::HTTP::ServerOptions;
-using eacp::HTTP::ServerThreadingMode;
 using eacp::Threads::callAsync;
 using eacp::Threads::stopEventLoop;
 using eacp::Time::MS;
 
 namespace
 {
-std::string baseUrl(int port)
-{
-    return "http://127.0.0.1:" + std::to_string(port);
-}
-
-std::string tempPath(const std::string& name)
-{
-    auto path = std::filesystem::temp_directory_path() / ("eacp-timeout-" + name);
-    auto ec = std::error_code();
-    std::filesystem::remove(path, ec);
-    return path.string();
-}
-
-// The handlers here sleep, so they must not run on the event loop that the
-// client's completion has to travel back through.
-ServerOptions threadPoolOptions()
-{
-    auto options = ServerOptions();
-    options.threading = ServerThreadingMode::ThreadPool;
-    options.threadPoolSize = 2;
-    return options;
-}
-
 Response okResponse()
 {
     auto res = Response();
@@ -150,7 +125,7 @@ struct TricklingServer
     std::thread worker;
 };
 
-Response runOffTheLoop(const std::function<Response()>& perform)
+Response responseOffTheLoop(const std::function<Response()>& perform)
 {
     auto result = Response();
     auto worker = std::thread();
@@ -192,7 +167,7 @@ TimedOutcome performAgainstStall(TricklingServer& server,
         return res;
     };
 
-    outcome.response = runOffTheLoop(timed);
+    outcome.response = responseOffTheLoop(timed);
     return outcome;
 }
 
@@ -294,7 +269,7 @@ auto tDownloadTimesOut = test("HttpTimeout/downloadFailsWhenTheServerStalls") = 
     req.timeout = MS {50};
     req.progress = &progress;
 
-    auto destination = tempPath("stalled");
+    auto destination = tempPath("timeout-stalled");
     auto gaveUpEarly = false;
 
     auto perform = [&]
@@ -376,7 +351,7 @@ auto tIdleSparesSteadyResponse =
     req.idleTimeout = MS {1000};
 
     auto started = eacp::Time::Deadline {MS {1000}};
-    auto res = runOffTheLoop([&] { return req.perform(); });
+    auto res = responseOffTheLoop([&] { return req.perform(); });
 
     check(res.error.empty());
     check(res.statusCode == 200);
@@ -394,7 +369,7 @@ auto tIdleFiresOnStalledDownload =
     req.idleTimeout = MS {300};
     req.progress = &progress;
 
-    auto destination = tempPath("idle-stalled");
+    auto destination = tempPath("timeout-idle-stalled");
     auto outcome =
         performAgainstStall(server, [&] { return req.downloadTo(destination); });
 
@@ -416,8 +391,8 @@ auto tIdleSparesSteadyDownload =
     req.idleTimeout = MS {1000};
     req.progress = &progress;
 
-    auto destination = tempPath("idle-steady");
-    auto res = runOffTheLoop([&] { return req.downloadTo(destination); });
+    auto destination = tempPath("timeout-idle-steady");
+    auto res = responseOffTheLoop([&] { return req.downloadTo(destination); });
 
     check(res.error.empty());
     check(res.statusCode == 200);
@@ -441,7 +416,7 @@ auto tConnectSparesLongTransfer =
     auto req = Request(server.url());
     req.connectTimeout = MS {300};
 
-    auto res = runOffTheLoop([&] { return req.perform(); });
+    auto res = responseOffTheLoop([&] { return req.perform(); });
 
     check(res.error.empty());
     check(res.statusCode == 200);
@@ -453,7 +428,7 @@ auto tConnectFailsFast = test("HttpTimeout/connectTimeoutStillReportsRefusal") =
     auto req = Request("http://127.0.0.1:1/refused");
     req.connectTimeout = MS {500};
 
-    auto res = runOffTheLoop([&] { return req.perform(); });
+    auto res = responseOffTheLoop([&] { return req.perform(); });
 
     check(!res.error.empty());
     check(res.statusCode == 0);
@@ -559,7 +534,7 @@ auto tConnectTimeoutFires =
 
     auto atLeastTheLimit = eacp::Time::Deadline {MS {400}};
     auto withinTheBound = eacp::Time::Deadline {withinTheIdleLimit};
-    auto res = runOffTheLoop([&] { return req.perform(); });
+    auto res = responseOffTheLoop([&] { return req.perform(); });
 
     check(!res.error.empty());
     check(res.statusCode == 0);

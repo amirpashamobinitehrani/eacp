@@ -17,29 +17,10 @@ using eacp::Threads::stopEventLoop;
 
 namespace
 {
-std::string baseUrl(int port)
-{
-    return "http://127.0.0.1:" + std::to_string(port);
-}
-
-std::string tempPath(const std::string& name)
-{
-    auto path = std::filesystem::temp_directory_path() / ("eacp-resume-" + name);
-    auto ec = std::error_code();
-    std::filesystem::remove(path, ec);
-    return path.string();
-}
-
 void writeFile(const std::string& path, const std::string& bytes)
 {
     auto out = std::ofstream(path, std::ios::binary | std::ios::trunc);
     out << bytes;
-}
-
-std::string readFile(const std::string& path)
-{
-    auto in = std::ifstream(path, std::ios::binary);
-    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
 void removeFile(const std::string& path)
@@ -235,7 +216,7 @@ Response
 struct ResumeCase
 {
     ResumeCase(const std::string& name, const std::string& existing)
-        : path(tempPath(name))
+        : path(tempPath("resume-" + name))
     {
         check(host.listening);
         writeFile(path, existing);

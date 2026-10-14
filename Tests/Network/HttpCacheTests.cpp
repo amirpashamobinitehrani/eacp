@@ -9,24 +9,9 @@ using eacp::HTTP::CachePolicy;
 using eacp::HTTP::Request;
 using eacp::HTTP::Response;
 using eacp::HTTP::Server;
-using eacp::Threads::callAsync;
-using eacp::Threads::stopEventLoop;
 
 namespace
 {
-std::string baseUrl(int port)
-{
-    return "http://127.0.0.1:" + std::to_string(port);
-}
-
-std::string tempPath(const std::string& name)
-{
-    auto path = std::filesystem::temp_directory_path() / ("eacp-cache-" + name);
-    auto ec = std::error_code();
-    std::filesystem::remove(path, ec);
-    return path.string();
-}
-
 // Answers with everything a cache needs to keep the response and to
 // revalidate it, and counts what reaches it.
 struct CacheableServer
@@ -64,30 +49,7 @@ struct CacheableServer
     std::atomic<int> conditionalHits {0};
 };
 
-bool runOffTheLoop(Server& server, const std::function<void()>& work)
-{
-    auto worker = std::thread();
-
-    auto startWorker = [&]
-    {
-        auto runAndStop = [&]
-        {
-            work();
-            callAsync([] { stopEventLoop(); });
-        };
-
-        worker = std::thread(runAndStop);
-    };
-
-    auto stopped =
-        eacp::Threads::runEventLoopFor(eacp::Time::MS {10000}, startWorker);
-
-    if (worker.joinable())
-        worker.join();
-
-    server.stop();
-    return stopped;
-}
+constexpr auto cacheBudget = eacp::Time::MS {10000};
 } // namespace
 
 auto tIgnoresCacheByDefault = test("HttpCache/defaultIgnoresTheLocalCache") = []
@@ -109,7 +71,8 @@ auto tRepeatedGetReachesServer =
         second = req.perform();
     };
 
-    check(runOffTheLoop(host.server, twice));
+    check(runOffTheLoop(twice, cacheBudget));
+    host.server.stop();
 
     check(first.statusCode == 200);
     check(second.statusCode == 200);
@@ -124,7 +87,7 @@ auto tRepeatedDownloadReachesServer =
     auto host = CacheableServer();
     check(host.listening);
 
-    auto path = tempPath("download.bin");
+    auto path = tempPath("cache-download.bin");
     auto last = Response();
 
     auto twice = [&]
@@ -134,7 +97,8 @@ auto tRepeatedDownloadReachesServer =
         last = req.downloadTo(path);
     };
 
-    check(runOffTheLoop(host.server, twice));
+    check(runOffTheLoop(twice, cacheBudget));
+    host.server.stop();
 
     check(last.statusCode == 200);
     check(host.hits.load() == 2);
@@ -161,7 +125,8 @@ auto tOptingInStillWorks = test("HttpCache/optingInToTheCacheStillAnswers") = []
         res = req.perform();
     };
 
-    check(runOffTheLoop(host.server, twice));
+    check(runOffTheLoop(twice, cacheBudget));
+    host.server.stop();
 
     check(res.error.empty());
     check(res.statusCode == 200);
