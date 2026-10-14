@@ -239,7 +239,7 @@ auto tSlowResponseTimesOut = test("HttpTimeout/slowResponseFailsBeforeTheReply")
     check(server.listen(0, handler));
 
     auto req = Request(baseUrl(server.boundPort()) + "/slow");
-    req.timeout = MS {250};
+    req.timeout = MS {50};
 
     auto gaveUpEarly = false;
 
@@ -291,7 +291,7 @@ auto tDownloadTimesOut = test("HttpTimeout/downloadFailsWhenTheServerStalls") = 
     auto progress = DownloadProgress();
 
     auto req = Request(baseUrl(server.boundPort()) + "/slow");
-    req.timeout = MS {250};
+    req.timeout = MS {50};
     req.progress = &progress;
 
     auto destination = tempPath("stalled");
