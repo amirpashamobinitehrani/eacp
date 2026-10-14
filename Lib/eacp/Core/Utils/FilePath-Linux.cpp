@@ -1,12 +1,48 @@
 #include "Environment.h"
 #include "FilePath.h"
+#include "Files.h"
+#include "Strings.h"
 
+#include <cerrno>
 #include <fstream>
+#include <optional>
+#include <vector>
+
+#include <pwd.h>
+#include <unistd.h>
 
 namespace eacp
 {
 namespace
 {
+// The home folder the password database records for this user, for a process
+// started without $HOME (a service, or a sanitised environment).
+std::string passwordDatabaseHome()
+{
+    auto bufferSize = ::sysconf(_SC_GETPW_R_SIZE_MAX);
+    auto buffer = std::vector<char>(bufferSize > 0 ? (std::size_t) bufferSize
+                                                   : std::size_t {16384});
+
+    while (true)
+    {
+        auto entry = passwd {};
+        auto* result = (passwd*) nullptr;
+        auto error =
+            ::getpwuid_r(::getuid(), &entry, buffer.data(), buffer.size(), &result);
+
+        if (error == ERANGE && buffer.size() < 1024 * 1024)
+        {
+            buffer.resize(buffer.size() * 2);
+            continue;
+        }
+
+        if (error != 0 || result == nullptr || result->pw_dir == nullptr)
+            return {};
+
+        return result->pw_dir;
+    }
+}
+
 FilePath configHome()
 {
     auto path = getEnvValue("XDG_CONFIG_HOME");
@@ -17,46 +53,88 @@ FilePath configHome()
     return FilePath::homeDirectory() / ".config";
 }
 
-// Resolves one entry of ~/.config/user-dirs.dirs (the XDG user-dirs
-// mechanism), e.g. XDG_MUSIC_DIR="$HOME/Music". Falls back to
-// $HOME/<fallback> when the file or the entry is missing.
+std::string withoutQuotes(std::string value)
+{
+    for (auto quote: {'"', '\''})
+    {
+        if (value.starts_with(quote))
+        {
+            value.erase(0, 1);
+
+            if (value.ends_with(quote))
+                value.pop_back();
+
+            break;
+        }
+    }
+
+    return value;
+}
+
+std::string replaceAll(std::string text, std::string_view from, std::string_view to)
+{
+    for (auto pos = text.find(from); pos != std::string::npos;
+         pos = text.find(from, pos + to.size()))
+        text.replace(pos, from.size(), to);
+
+    return text;
+}
+
+// The value of a `KEY=value` line of user-dirs.dirs, or nullopt when the line
+// assigns something else.
+std::optional<std::string> userDirsValue(std::string_view line, std::string_view key)
+{
+    auto text = Strings::trim(line);
+
+    if (!text.starts_with(key))
+        return std::nullopt;
+
+    auto rest = Strings::trim(std::string_view {text}.substr(key.size()));
+
+    if (!rest.starts_with('='))
+        return std::nullopt;
+
+    return withoutQuotes(Strings::trim(std::string_view {rest}.substr(1)));
+}
+
+// Resolves one entry of user-dirs.dirs (the XDG user-dirs mechanism), e.g.
+// XDG_MUSIC_DIR="$HOME/Music", the way JUCE does: an entry counts only when
+// the folder it names exists, and $HOME/<fallback> is the answer otherwise.
 FilePath xdgUserDirectory(std::string_view key, std::string_view fallback)
 {
-    auto fallbackPath = FilePath::homeDirectory() / fallback;
+    auto home = FilePath::homeDirectory();
     auto stream = std::ifstream((configHome() / "user-dirs.dirs").str());
-    auto prefix = std::string {key} + "=\"";
 
     for (auto line = std::string(); std::getline(stream, line);)
     {
-        if (!line.starts_with(prefix))
+        auto value = userDirsValue(line, key);
+
+        if (!value.has_value() || value->empty())
             continue;
 
-        auto closing = line.rfind('"');
+        auto path = FilePath {replaceAll(*value, "$HOME", home.str())};
 
-        if (closing < prefix.size())
-            return fallbackPath;
-
-        auto value = line.substr(prefix.size(), closing - prefix.size());
-
-        if (value.empty())
-            return fallbackPath;
-
-        constexpr auto homePrefix = std::string_view {"$HOME"};
-
-        if (value.starts_with(homePrefix))
-            return FilePath {FilePath::homeDirectory().str()
-                             + value.substr(homePrefix.size())};
-
-        return FilePath {value};
+        if (Files::isDirectory(path))
+            return path;
     }
 
-    return fallbackPath;
+    return home / fallback;
 }
 } // namespace
 
 FilePath FilePath::homeDirectory()
 {
-    return FilePath {getEnvValue("HOME")};
+    auto path = getEnvValue("HOME");
+
+    if (path.empty())
+        path = passwordDatabaseHome();
+
+    // JUCE's File drops the trailing separator, and paths built on this one
+    // have to match it.
+    if (path.size() > 1 && path.ends_with('/'))
+        path.pop_back();
+
+    return FilePath {path};
 }
 
 FilePath FilePath::documentsDirectory()
