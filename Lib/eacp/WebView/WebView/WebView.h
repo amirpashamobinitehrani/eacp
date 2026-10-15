@@ -340,6 +340,14 @@ public:
     std::function<void(FileDragPoint)> onFileDragEnded = [](auto&&) {};
     std::function<void()> onClose = [] {};
 
+    // Downloads (Apple platforms, macOS 11.3+ / iOS 14.5+). A navigation to
+    // something WebKit can't display, or an anchor marked `download`, becomes
+    // a download into the user's Downloads directory under a collision-free
+    // name; these report where it landed / why it died. On Windows, WebView2
+    // runs its own download UI and these never fire.
+    std::function<void(const std::string& path)> onDownloadFinished = [](auto&&) {};
+    std::function<void(const std::string& error)> onDownloadFailed = [](auto&&) {};
+
     // Fired (with Options::forwardUnhandledKeys) for every key event the page
     // did not consume. Return true to consume it here; returning false sends
     // it on up the native responder chain to whatever hosts the view.
