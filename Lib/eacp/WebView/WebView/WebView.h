@@ -191,6 +191,17 @@ public:
         // hardware-key chain to feed, so it is a no-op there.
         bool forwardUnhandledKeys = false;
 
+        // Ask the user before a page gets the camera or microphone. Off (the
+        // default) grants every getUserMedia request once the app itself has
+        // OS permission, which suits an app whose pages are its own UI. A
+        // general browser loads arbitrary sites and should turn this on: macOS
+        // 12+ answers WKPermissionDecisionPrompt so WebKit shows its own
+        // per-origin prompt, and Windows leaves PermissionRequested at its
+        // default so WebView2 shows its prompt. macOS 11 has no prompt to
+        // defer to (only the private _WKCaptureDevices SPI), so there the
+        // request is denied.
+        bool promptForMediaCapture = false;
+
         // Keep requestAnimationFrame-driven content advancing while the view is
         // off-screen, so an animated canvas (a spectrum analyser, a meter, a
         // visualiser) is captured by renderToImageAsync / takeSnapshot instead of
