@@ -1077,26 +1077,28 @@ struct WebView::Native
             &webMessageToken);
 
         // Auto-grant camera / microphone the way the macOS backend does via its
-        // requestMediaCapturePermissionForOrigin UIDelegate. Without a handler
-        // WebView2 leaves the request in its default state, so getUserMedia from
-        // a page loaded here would never be allowed. Other permission kinds fall
-        // through to WebView2's default (prompt) behaviour.
-        webView->add_PermissionRequested(
-            Microsoft::WRL::Callback<ICoreWebView2PermissionRequestedEventHandler>(
-                [](ICoreWebView2*,
-                   ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT
-                {
-                    auto kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
-                    args->get_PermissionKind(&kind);
+        // requestMediaCapturePermissionForOrigin UIDelegate. Other permission
+        // kinds fall through to WebView2's default (prompt) behaviour, and so
+        // do camera / microphone with Options::promptForMediaCapture.
+        if (! options.promptForMediaCapture)
+        {
+            webView->add_PermissionRequested(
+                Microsoft::WRL::Callback<ICoreWebView2PermissionRequestedEventHandler>(
+                    [](ICoreWebView2*,
+                       ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT
+                    {
+                        auto kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+                        args->get_PermissionKind(&kind);
 
-                    if (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
-                        || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
-                        args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+                        if (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+                            || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
+                            args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
 
-                    return S_OK;
-                })
-                .Get(),
-            &permissionRequestedToken);
+                        return S_OK;
+                    })
+                    .Get(),
+                &permissionRequestedToken);
+        }
 
         // window.open / target="_blank" -> hand the embedder a new app-owned
         // WebView, mirroring the macOS createWebViewWithConfiguration delegate.
