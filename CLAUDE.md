@@ -737,7 +737,11 @@ matching `APPLE`/`IOS`/`WIN32`/`LINUX` branch.
   A `keyDown`/`keyUp` override keeps every key it is handed unless it calls
   `passKeyOn()` (`dispatchKeyEvent` returns which); on Android a passed-on
   `KeyCode::Back` — its own code, not `Escape` — leaves the activity, so a view
-  closes a popup on Back and passes every other press on
+  closes a popup on Back and passes every other press on. Keys go to the view
+  that last called `focus()` (the content view when none has) and up its
+  parents while each passes them on: AppKit's first responder on Apple, and on
+  Windows, Linux and Android one record on the root view that the window's
+  `dispatchKeyEvent` reads, dropped when the focused view leaves the tree
 - `Window`: the platform window (Cocoa, Win32, UIKit, Wayland or X11) with configurable flags
 - `Path`: Vector path drawing (rect, ellipse, curves)
 - `Font`: CoreText / DirectWrite typography, `EACP_HAS_CONTEXT` only
