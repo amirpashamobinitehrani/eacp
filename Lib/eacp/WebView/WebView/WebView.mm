@@ -159,6 +159,7 @@ struct WebView::PopupInit
 {
     WKWebViewConfiguration* configuration = nil;
     bool inspectable = false;
+    bool promptForMediaCapture = false;
 };
 
 struct WebView::Native
@@ -249,6 +250,7 @@ struct WebView::Native
             webView.get().customUserAgent = Strings::toNSString(options.userAgent);
 
         loadDeclinedPopupsInline = options.loadDeclinedPopupsInline;
+        promptForMediaCapture = options.promptForMediaCapture;
 
         detail::setFileDragStartedCallback(
             webView.get(),
@@ -288,6 +290,8 @@ struct WebView::Native
                            options:NSKeyValueObservingOptionNew
                            context:nullptr];
         observingTitle = true;
+
+        promptForMediaCapture = init.promptForMediaCapture;
 
         if (init.inspectable)
             setWebViewInspectable(webView.get(), true);
@@ -340,14 +344,18 @@ struct WebView::Native
     double zoomLevel = 1.0;
     bool observingTitle = false;
     bool loadDeclinedPopupsInline = true;
+    bool promptForMediaCapture = false;
 };
 
 struct WebViewNativeAccess
 {
     static OwningPointer<WebView>
-        makePopup(WKWebViewConfiguration* configuration, bool inspectable)
+        makePopup(WKWebViewConfiguration* configuration,
+                  bool inspectable,
+                  bool promptForMediaCapture)
     {
-        auto init = WebView::PopupInit {configuration, inspectable};
+        auto init = WebView::PopupInit {
+            configuration, inspectable, promptForMediaCapture};
         return OwningPointer<WebView> {new WebView {init}};
     }
 
@@ -450,8 +458,8 @@ WKWebView* webViewDelegateCreateWebView(id self,
     if (! native)
         return nil;
 
-    auto popup = eacp::Graphics::WebViewNativeAccess::makePopup(configuration,
-                                                                inspectable);
+    auto popup = eacp::Graphics::WebViewNativeAccess::makePopup(
+        configuration, inspectable, native->promptForMediaCapture);
     auto* popupWKWebView = eacp::Graphics::WebViewNativeAccess::wkWebViewOf(*popup);
 
     // Configuration-level options travel with `configuration`; view-level
@@ -669,7 +677,7 @@ void webViewDelegateDownloadDidFail(
 
 API_AVAILABLE(macos(12.0), ios(15.0))
 void webViewDelegateRequestMediaCapture(
-    id,
+    id self,
     SEL,
     WKWebView*,
     WKSecurityOrigin*,
@@ -677,6 +685,16 @@ void webViewDelegateRequestMediaCapture(
     WKMediaCaptureType,
     void (^handler)(WKPermissionDecision decision))
 {
+    // Options::promptForMediaCapture: hand the decision to WebKit's own
+    // per-origin prompt instead of granting every page.
+    auto native = getWebViewDelegateState(self)->nativeWeak.lock();
+
+    if (native && native->promptForMediaCapture)
+    {
+        handler(WKPermissionDecisionPrompt);
+        return;
+    }
+
     handler(WKPermissionDecisionGrant);
 }
 
@@ -689,7 +707,7 @@ void webViewDelegateRequestMediaCapture(
 // a blanket denial on exactly the macOS 11 systems this exists to serve. Both
 // paths now answer the same way, so whichever WebKit dispatches, the decision
 // matches and the request never hangs.
-void webViewDelegateRequestUserMediaSPI(id,
+void webViewDelegateRequestUserMediaSPI(id self,
                                         SEL,
                                         WKWebView*,
                                         _WKCaptureDevices,
@@ -697,7 +715,10 @@ void webViewDelegateRequestUserMediaSPI(id,
                                         NSURL*,
                                         void (^handler)(BOOL authorized))
 {
-    handler(YES);
+    // This SPI has no "ask the user" answer, so a view that wants a prompt
+    // is denied rather than silently granted (Options::promptForMediaCapture).
+    auto native = getWebViewDelegateState(self)->nativeWeak.lock();
+    handler(native && native->promptForMediaCapture ? NO : YES);
 }
 #endif
 
