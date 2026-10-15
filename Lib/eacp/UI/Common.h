@@ -53,15 +53,15 @@ constexpr bool sameRect(const Rect& a, const Rect& b)
 // in, and the reason there are four rather than one.
 struct CornerRadii
 {
-    float topLeft = 0.f;
-    float topRight = 0.f;
-    float bottomRight = 0.f;
-    float bottomLeft = 0.f;
-
     static constexpr CornerRadii all(float radius)
     {
         return {radius, radius, radius, radius};
     }
+
+    float topLeft = 0.f;
+    float topRight = 0.f;
+    float bottomRight = 0.f;
+    float bottomLeft = 0.f;
 };
 
 // A rectangle whose corners are rounded, each by its own radius. A draw that
@@ -69,9 +69,6 @@ struct CornerRadii
 // radii are all zero, is uncut -- a square cut being the clip's job.
 struct RoundedRect
 {
-    Rect rect;
-    CornerRadii radii;
-
     constexpr bool isEmpty() const { return rect.w <= 0.f || rect.h <= 0.f; }
 
     constexpr bool isRounded() const
@@ -80,6 +77,9 @@ struct RoundedRect
                && (radii.topLeft > 0.f || radii.topRight > 0.f
                    || radii.bottomRight > 0.f || radii.bottomLeft > 0.f);
     }
+
+    Rect rect {};
+    CornerRadii radii {};
 };
 
 // The radii the rect can actually hold. Where two corners on one side ask for
