@@ -124,6 +124,16 @@ ObjC::Ptr<NSObject<MTLSamplerState>>
 
     return [metalDevice newSamplerStateWithDescriptor:metal];
 }
+
+// macOS 27 deprecates the Mac2 family because it runs only on Apple GPUs, but
+// the deployment target still reaches Intel Macs, whose GPUs are Mac2 only.
+bool isMac2Family(id<MTLDevice> metalDevice)
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return [metalDevice supportsFamily:MTLGPUFamilyMac2] == YES;
+#pragma clang diagnostic pop
+}
 } // namespace
 
 struct Device::Native
@@ -295,7 +305,7 @@ bool Device::supportsCubeArrays() const
     if (metalDevice == nil)
         return false;
 
-    return [metalDevice supportsFamily:MTLGPUFamilyMac2] == YES
+    return isMac2Family(metalDevice)
            || [metalDevice supportsFamily:MTLGPUFamilyApple4] == YES;
 }
 
@@ -306,7 +316,7 @@ bool Device::supportsLayeredRendering() const
     if (metalDevice == nil)
         return false;
 
-    return [metalDevice supportsFamily:MTLGPUFamilyMac2] == YES
+    return isMac2Family(metalDevice)
            || [metalDevice supportsFamily:MTLGPUFamilyApple5] == YES;
 }
 
