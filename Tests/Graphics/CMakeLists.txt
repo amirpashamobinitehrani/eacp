@@ -31,6 +31,7 @@ set(graphics_test_sources
         MagnifyTests.cpp
         MenuCommandsTests.cpp
         MenuTests.cpp
+        MouseTrackingLifetimeTests.cpp
         RectTests.cpp
         RoundedRectTests.cpp
         ScrollWheelTests.cpp
@@ -99,6 +100,7 @@ endif ()
 if (WIN32)
     list(APPEND graphics_test_sources
             CompositionPixelTests-Windows.cpp
+            KeyFocusTests-Windows.cpp
             KeyForwardingTests-Windows.cpp
             MouseDeltaTests-Windows.cpp
             MouseWheelTests-Windows.cpp
