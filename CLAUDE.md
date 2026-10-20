@@ -337,6 +337,43 @@ cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Debug -DEACP_UNITY_BUILD=OFF \
       -DEACP_WEBVIEW_DEV=ON
 ```
 
+- `EACP_HOT_RELOAD` (default `OFF`): the dev/static mode of every app wired
+  with `eacp_add_hot_reload(<app> MODULE <module> SOURCES <files...>
+  [HOT_RELOAD ON|OFF])` (`CMake/EacpPlugin.cmake`) that names no mode of its
+  own. An app's `HOT_RELOAD ON` is always dev mode and `OFF` always static,
+  whatever the option says; `Apps/UI/HotReload` names none, so it follows
+  the option. iOS and Android (no cmake to run) and Windows (not supported: `WINDOWS_EXPORT_ALL_SYMBOLS` never
+  exports a static library's symbols, and a module linking the exe would
+  relink a locked exe on every save) are always off. The sources are compiled
+  into the app in both modes, so that copy is generation 0 and the fallback;
+  dev mode also builds them as a module the app reloads on save, static mode
+  builds no module, no watcher and no build runner. The module links nothing
+  and binds at load time to the eacp the app exports (`-undefined
+  dynamic_lookup` on Apple, a Linux module's default), so C++ types cross its
+  one `extern "C"` entry point. Dev mode gives the app `ENABLE_EXPORTS`
+  (`-export_dynamic` on Apple, `--export-dynamic` on Linux, which keeps the
+  exports alive under the libraries' Release IPO), links every static library
+  in its link closure whole-archive so the module can call what the app never
+  does, and compiles every eacp library in that closure at default
+  visibility. That is a property of the library targets, so of the whole
+  build directory: `eacp_add_plugin` modules built there re-export eacp and
+  lose their isolation, and should not be mixed with a hot-reload build.
+  A save rebuilds the module alone, never the running app. Everything in the
+  module's sources but its entry point stays in an anonymous namespace, or
+  it binds to the app's generation-0 copy. The module owns
+  nothing: no objects, no callbacks, no state, since its image is unmapped a
+  loop turn after the next reload. The host reads its mode and module from
+  `Core/Plugins/HotReload.h` — `if constexpr (Plugins::isHotReload())`,
+  `hotReloadTarget()` and `hotReloadBuildCommand` — and never spells an
+  `EACP_HOT_RELOAD_*` macro; it includes that header directly, never through
+  the `Core.h` umbrella, because its contents depend on the app's own compile
+  definitions. A configure prints `<app>: hot reload ON/OFF`.
+
+```bash
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Debug -DEACP_UNITY_BUILD=OFF \
+      -DEACP_HOT_RELOAD=ON
+```
+
 ### Local Miro source
 
 Miro is fetched via CPM from `eyalamirmusic/Miro` by default. To work against a
@@ -834,6 +871,9 @@ matching `APPLE`/`IOS`/`WIN32`/`LINUX` branch.
   thread serves every pending callback, so N deadlines cost one thread, not N;
   `Threads::delay` is built on it (`Threads/CallAfter.cpp`)
 - `Timer`: periodic callbacks, taking either `Time::MS` or an integer Hz
+- `Thread` (`Threads/Thread.h`): a joining thread whose header keeps
+  `<thread>` out of public headers; the only wrapper eacp has, so new worker
+  threads in headers use it
 - `DisplayLink`: CADisplayLink-backed V-sync synchronized callbacks
 - `FramePacer` (`Graphics/Helpers/FramePacer.h`): the frame-rate divider
   behind `DisplayLink::setMaxFps`, `ComponentHost::setAnimationMaxFps` and
@@ -1009,6 +1049,21 @@ matching `APPLE`/`IOS`/`WIN32`/`LINUX` branch.
   same options through cmd.exe), `ProcessTokeniseTests.cpp` (everywhere)
 - POSIX impl (`Process-Posix.cpp`, fork/exec) shared by macOS+Linux; Windows uses
   `CreateProcessW` (`Process-Windows.cpp`)
+- `BuildRunner` (`Process/BuildRunner.h`): one command rerun on demand on a
+  background thread, stderr merged; `onOutput`/`onFinished` on the main thread;
+  `run()` mid-run coalesces into exactly one rerun; a cancelled run finishes
+  with `exited == false` (cancel kills the direct child only, not ninja under
+  cmake)
+- `Plugins::ReloadableLibrary` (`Plugins/ReloadableLibrary.h`): `reload()` opens
+  a uniquely named staged copy of a module being rebuilt and hands the old
+  image to `Plugins::unload`; every pointer from the image dies at the next
+  successful reload. `Apps/UI/HotReload` is the worked example of it,
+  `BuildRunner` and `FileWatcher` together: an eacp-ui layout function
+  (`demoLayout(const LayoutTargets&, const UI::Rect&)`, calling `setBounds`
+  on components the host owns) in a module, rebuilt and reloaded on save,
+  or compiled in statically when
+  `EACP_HOT_RELOAD` says so (`Plugins/HotReload.h`: `isHotReload()`,
+  `HotReloadTarget`, `hotReloadBuildCommand`)
 
 **ObjC/** - Memory management bridge
 - `Ptr<T>`: RAII smart pointer for Objective-C objects (handles retain/release)
@@ -1091,6 +1146,10 @@ matching `APPLE`/`IOS`/`WIN32`/`LINUX` branch.
   `FileWriter` (`Utils/FileWriter.h`): `std::fstream` opened in+out — never
   `ios::app`, so `seek` can patch earlier bytes — with `truncate()` through
   `std::filesystem::resize_file`
+- `Files::FileWatcher` (`Utils/FileWatcher.h`): polls paths on the main thread
+  (`pollInterval`, recursive, a `matchesWildcard` `pattern`) and reports the
+  changed files once per burst after `settle`; a missing path is watched for
+  appearing, and the callback must not destroy the watcher
 - `Pimpl<T>`: Pointer-to-implementation pattern
 - `Singleton<T>::get()`: Thread-safe singleton
 - `Vectors`: Container algorithms (`contains`, `eraseMatch`, `find`)
