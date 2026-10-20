@@ -30,6 +30,7 @@ target_sources(eacp-core PRIVATE
         Platform/AppInfo.cpp
         Platform/Platform.cpp
         Plugins/DynamicLibrary.cpp
+        Plugins/HotReloadLoop.cpp
         Plugins/ReloadableLibrary.cpp
         Process/BuildRunner.cpp
         Process/Process.cpp
@@ -51,6 +52,7 @@ target_sources(eacp-core PRIVATE
         Utils/Logging.cpp
         Utils/MemoryMappedFile.cpp
         Utils/Random.cpp
+        Utils/SourceWatcher.cpp
         Utils/Strings.cpp
         Utils/TemporaryFile.cpp
         Utils/Time.cpp
