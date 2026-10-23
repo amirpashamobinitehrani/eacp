@@ -94,6 +94,7 @@ function(eacp_link_hot_reload app module)
     foreach (link IN LISTS direct)
         if (TARGET "${link}")
             target_link_libraries(${module} PRIVATE $<COMPILE_ONLY:${link}>)
+            add_dependencies(${module} ${link})
         endif ()
 
         if (NOT link IN_LIST archives)

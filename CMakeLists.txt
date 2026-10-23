@@ -26,11 +26,6 @@ endif ()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
 
-find_package(ESIMD REQUIRED)
-find_package(EADataStructures REQUIRED)
-find_package(ResEmbed REQUIRED)
-find_package(Miro REQUIRED)
-
 include(ConfigureLog)
 
 option(EACP_UNITY_BUILD "Compile eacp libraries as CMake unity builds" OFF)
@@ -150,6 +145,11 @@ if (PROJECT_IS_TOP_LEVEL)
 endif ()
 
 set(CMAKE_CXX_STANDARD 20)
+
+find_package(ESIMD REQUIRED)
+find_package(EADataStructures REQUIRED)
+find_package(ResEmbed REQUIRED)
+find_package(Miro REQUIRED)
 
 add_subdirectory(ThirdParty)
 add_subdirectory(Lib)
