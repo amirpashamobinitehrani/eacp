@@ -394,8 +394,6 @@ END
     "version": "@app_version@"
 }
 ]==])
-
-    find_package(ResEmbed REQUIRED)
     res_embed_add(${target}
             FILES     "${app_info_json}"
             NAMESPACE AppInfo

@@ -1,8 +1,5 @@
 include(FetchContent)
 
-find_package(ResEmbed REQUIRED)
-find_package(Miro REQUIRED)
-
 # The page bridge, over a ScriptHost rather than over a WebView: the shim, the
 # wire format, the Miro command table and the EACP_STATE binders. It touches no
 # native web runtime — no WebKit, no WebView2 — so a host that runs scripts

@@ -1,11 +1,8 @@
 add_library(eacp-core STATIC)
 target_include_directories(eacp-core PUBLIC ${CMAKE_CURRENT_LIST_DIR}/../../)
 
-find_package(EADataStructures REQUIRED)
 target_link_libraries(eacp-core PUBLIC ea_data_structures)
 
-find_package(ResEmbed REQUIRED)
-find_package(Miro REQUIRED)
 target_link_libraries(eacp-core PUBLIC ResEmbed Miro)
 
 # PRIVATE: Zip.cpp is the only thing that includes miniz.h.

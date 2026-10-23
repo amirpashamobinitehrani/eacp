@@ -72,8 +72,6 @@ set_default_target_setting(eacp-network)
 eacp_enable_unity_build(eacp-network)
 add_ide_sources(eacp-network)
 
-find_package(Miro REQUIRED)
-
 add_library(eacp-network-json STATIC)
 
 target_sources(eacp-network-json PRIVATE
