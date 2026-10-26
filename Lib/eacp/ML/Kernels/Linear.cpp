@@ -101,10 +101,13 @@ int linearTileRowsFor(int rows)
     return tileCount(rows, 32) * 32 < tileCount(rows, 64) * 64 ? 32 : 64;
 }
 
-LinearF32::LinearF32(LinearLoads loadsToUse, int tileRowsToUse)
+LinearF32::LinearF32(LinearLoads loadsToUse,
+                     int tileRowsToUse,
+                     LinearWeights weightsToUse)
     : ComputeProgram({(int) f32Threads, 1, 1})
     , loads(loadsToUse)
     , tileRows(tileRowsToUse)
+    , weights(weightsToUse)
 {
     compile();
 }
@@ -176,6 +179,37 @@ void LinearF32::define()
         return float4(element(0u), element(1u), element(2u), element(3u));
     };
 
+    // The same four k of a weight row, widened from fp16 where it is packed:
+    // readHalf4 takes the two words that hold them, so the clamp and the
+    // zeroing past the end of k are readFour's.
+    auto readWeightFour = [&](const UInt& rowBase, const UInt& k)
+    {
+        if (weights == LinearWeights::F32)
+            return readFour(weight, rowBase, k);
+
+        if (loads == LinearLoads::FourWide)
+        {
+            auto inside = k < innerCount;
+            auto at = min(k, innerCount - 4u);
+            auto four = weight.readHalf4((rowBase + at) / 4u);
+
+            return float4(select(inside, four.x(), 0.f),
+                          select(inside, four.y(), 0.f),
+                          select(inside, four.z(), 0.f),
+                          select(inside, four.w(), 0.f));
+        }
+
+        auto element = [&](unsigned offset)
+        {
+            auto at = k + offset;
+            return select(at < innerCount,
+                          weight.readHalf(rowBase + min(at, innerCount - 1u)),
+                          0.f);
+        };
+
+        return float4(element(0u), element(1u), element(2u), element(3u));
+    };
+
     // Quad q of this thread's share of a slab: which row of the tile, and which
     // four k of the slab.
     auto quadRow = [&](unsigned q)
@@ -202,7 +236,7 @@ void LinearF32::define()
         for (auto q = 0u; q < f32QuadsB; ++q)
         {
             auto row = min(n0 + quadRow(q), columnCount - 1u) * innerCount;
-            *stagedB[q] = readFour(weight, row, k0 + quadDepth(q));
+            *stagedB[q] = readWeightFour(row, k0 + quadDepth(q));
         }
     };
 
@@ -481,23 +515,15 @@ Tensor linear(ComputePass& pass,
 
     auto result = Tensor::uninitializedF32({rows, columns}, device);
 
-    if (weight.isPacked())
-    {
-        auto& kernel = sharedKernel<LinearPackedHalf>(device);
-        kernel.activations = input;
-        kernel.weight = weight;
-        kernel.output = result;
-        kernel.dispatch(pass, rows, columns, inner);
-    }
-    else
-    {
-        auto& kernel = sharedKernel<LinearF32>(
-            device, linearLoadsFor(inner), linearTileRowsFor(rows));
-        kernel.activations = input;
-        kernel.weight = weight;
-        kernel.output = result;
-        kernel.dispatch(pass, rows, columns, inner);
-    }
+    auto& kernel = sharedKernel<LinearF32>(
+        device,
+        linearLoadsFor(inner),
+        linearTileRowsFor(rows),
+        weight.isPacked() ? LinearWeights::PackedF16 : LinearWeights::F32);
+    kernel.activations = input;
+    kernel.weight = weight;
+    kernel.output = result;
+    kernel.dispatch(pass, rows, columns, inner);
 
     if (bias != nullptr)
     {

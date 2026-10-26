@@ -2,12 +2,15 @@
 
 #include <eacp/GPU/CommandBuffer/CommandBuffer.h>
 #include <eacp/GPU/Device/Device.h>
+#include <eacp/GPU/Codegen/PackedScalars.h>
+#include <eacp/GPU/Codegen/ShaderEmitter.h>
 #include <eacp/GPU/Frame/ComputePass.h>
 #include <eacp/ML/Kernels/Linear.h>
 
 #include <cmath>
 #include <cstring>
 #include <optional>
+#include <string>
 #include <vector>
 
 using namespace nano;
@@ -291,6 +294,96 @@ auto tLinearTilingsGiveTheSameBits = test("Linear/tilingsGiveTheSameBits") = []
     check(tall.size() == short32.size());
     check(std::memcmp(tall.data(), short32.data(), tall.size() * sizeof(float)) == 0);
     checkMatches(tall, referenceLinear(x, w, nullptr, rows, inner, columns), 1.0e-3f);
+};
+
+namespace
+{
+std::vector<float> roundedToHalf(const std::vector<float>& values)
+{
+    auto rounded = std::vector<float> {};
+
+    for (auto value: values)
+        rounded.push_back(halfToFloat(halfFromFloat(value)));
+
+    return rounded;
+}
+
+bool sameBits(const std::vector<float>& a, const std::vector<float>& b)
+{
+    return a.size() == b.size()
+           && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+} // namespace
+
+// A packed weight is widened exactly into the tiles an fp32 one fills, so the
+// product sequence is the same and so are the bits - whatever the read width,
+// the tile height, a bias, or a batch and a k that leave tiles ragged.
+auto tLinearPackedWeightGivesTheBitsOfItsValues =
+    test("Linear/packedWeightGivesTheBitsOfItsValues") = []
+{
+    auto& device = Device::shared();
+
+    if (!device.isValid())
+        return;
+
+    struct Shape
+    {
+        int rows;
+        int inner;
+        int columns;
+    };
+
+    for (auto shape: {Shape {99, 76, 136},
+                      Shape {387, 76, 70},
+                      Shape {100, 45, 76},
+                      Shape {5, 7, 6},
+                      Shape {8, 1024, 1024}})
+    {
+        auto x = roundingValues(shape.rows * shape.inner, 0.7f);
+        auto w = roundingValues(shape.columns * shape.inner, 1.9f);
+        auto b = roundingValues(shape.columns, 2.3f);
+
+        auto input =
+            Tensor::fromHostF32(x.data(), {shape.rows, shape.inner}, device);
+        auto packed = Tensor::fromHostPackedF16(
+            w.data(), {shape.columns, shape.inner}, device);
+        auto widened = roundedToHalf(w);
+        auto unpacked = Tensor::fromHostF32(
+            widened.data(), {shape.columns, shape.inner}, device);
+        auto bias = Tensor::fromHostF32(b.data(), {shape.columns}, device);
+
+        check(packed.isPacked());
+
+        auto fromPacked = runLinear(device, input, packed, &bias).toHostF32();
+        auto fromFloats = runLinear(device, input, unpacked, &bias).toHostF32();
+        check(sameBits(fromPacked, fromFloats));
+
+        checkMatches(
+            fromPacked,
+            referenceLinear(x, widened, &b, shape.rows, shape.inner, shape.columns),
+            1.0e-3f + 2.0e-5f * shape.inner);
+    }
+};
+
+// The packed reads ask nothing of a backend beyond widening a stored half -
+// f16tof32 on D3D12's shader model 5, unpackHalf2x16 on Vulkan, a half2 view on
+// Metal - so every variant has to come out in all three dialects.
+auto tLinearPackedWeightEmitsForEveryBackend =
+    test("Linear/packedWeightEmitsForEveryBackend") = []
+{
+    for (auto loads: {LinearLoads::FourWide, LinearLoads::Scalar})
+        for (auto tileRows: {32, 64})
+        {
+            auto kernel = LinearF32 {loads, tileRows, LinearWeights::PackedF16};
+            const auto& graph = kernel.graph();
+
+            check(emitMetal(graph).find("half2") != std::string::npos);
+            check(emitHlsl(graph).find("f16tof32") != std::string::npos);
+            check(emitGlsl(graph).find("unpackHalf2x16") != std::string::npos);
+
+            auto floats = LinearF32 {loads, tileRows};
+            check(emitHlsl(floats.graph()).find("f16tof32") == std::string::npos);
+        }
 };
 
 auto tLinearTileRowsPadTheBatchLeast = test("Linear/tileRowsPadTheBatchLeast") = []

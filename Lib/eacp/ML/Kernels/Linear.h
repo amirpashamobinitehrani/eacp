@@ -25,11 +25,23 @@ LinearLoads linearLoadsFor(int inner);
 // gives the same bits.
 int linearTileRowsFor(int rows);
 
+// How LinearF32 finds its weight: fp32, or fp16 packed two to a word, which it
+// widens as it reads - exactly, on every backend - into the same tiles, so the
+// products run in the same order and a packed weight gives the bits an fp32
+// weight holding the same values gives, while half the weight bytes move.
+enum class LinearWeights
+{
+    F32,
+    PackedF16
+};
+
 // output = activations x weightᵀ in fp32 on SIMD-group matrices.
 class LinearF32 final : public GPU::ComputeProgram
 {
 public:
-    LinearF32(LinearLoads loads, int tileRows);
+    LinearF32(LinearLoads loads,
+              int tileRows,
+              LinearWeights weights = LinearWeights::F32);
 
     void dispatch(GPU::ComputePass& pass, int rows, int columns, int inner);
 
@@ -47,6 +59,7 @@ private:
 
     LinearLoads loads;
     int tileRows;
+    LinearWeights weights;
 };
 
 class LinearPackedHalf final : public GPU::ComputeProgram
