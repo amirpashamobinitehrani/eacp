@@ -5,10 +5,15 @@
 #include "MouseEvent.h"
 
 #include <functional>
+#include <memory>
 
 namespace eacp::UI
 {
+template <typename T>
+class SafePointer;
+
 class ComponentHost;
+class Theme;
 class DragAndDropTarget;
 class DragAndDropContainer;
 
@@ -81,6 +86,11 @@ public:
     void setVisible(bool shouldBeVisible);
     bool isVisible() const;
 
+    // Whether the frame draws this component at all: it and every ancestor
+    // visible, in a tree that is in a host. A hidden tab page's children are
+    // visible and not showing.
+    bool isShowing() const;
+
     // Z-order among siblings. Last painted is on top, and hit testing walks the
     // same order reversed, so the two can never disagree.
     void toFront();
@@ -93,8 +103,21 @@ public:
     void setInterceptsMouseClicks(bool shouldIntercept);
     bool getInterceptsMouseClicks() const;
 
-    void setMouseCursor(eacp::Graphics::MouseCursor cursorToUse);
-    eacp::Graphics::MouseCursor getMouseCursor() const;
+    // Whether paint() may draw past this component's bounds, as
+    // juce::Component::setPaintingIsUnclipped. What it draws is still cut by
+    // the clip its parent was left with, and its children are still cut by
+    // their own bounds. Off by default.
+    void setPaintingIsUnclipped(bool shouldBeUnclipped);
+    bool isPaintingUnclipped() const;
+
+    // Shown while the pointer is over this component, and at once when it
+    // already is: a tool whose pointer changes with the tool chosen does not
+    // wait for the pointer to move.
+    void setMouseCursor(const eacp::Graphics::MouseCursor& cursorToUse);
+    const eacp::Graphics::MouseCursor& getMouseCursor() const;
+
+    bool startFileDrag(const Vector<std::string>& paths,
+                       const eacp::Graphics::FileDragOptions& options = {});
 
     // Says that what this component draws has changed, so paint() has to be
     // asked again before the next frame.
@@ -153,12 +176,24 @@ public:
     virtual void mouseUp(const MouseEvent&);
     virtual void mouseMove(const MouseEvent&);
 
+    // The second click of a double-click, sent to the component that took the
+    // press right after its mouseUp, as juce::Component::mouseDoubleClick. The
+    // press and release themselves still arrive as usual, the down carrying
+    // clickCount == 2, so a component that reads clickCount in mouseDown sees
+    // no change. Not sent when the release destroyed the component.
+    virtual void mouseDoubleClick(const MouseEvent&);
+
     // Return true to consume the wheel event. Unconsumed, it carries on up the
     // tree, which is what a list needs: the pointer is over a row, and the row
     // does not scroll but the list holding it does. Returning a verdict rather
     // than forwarding by hand means a component that ignores the wheel needs no
     // code at all to let its parent have it.
     virtual bool mouseWheelMove(const MouseEvent&);
+
+    // A trackpad pinch, event.magnifyScale being the step's zoom factor. Goes
+    // where the wheel goes and, like it, up the tree until something returns
+    // true.
+    virtual bool mouseMagnify(const MouseEvent&);
 
     // A finger, unlike a pointer, is how a list is scrolled, so a press on a
     // button inside a scrolling panel may turn out to be the start of a scroll.
@@ -262,6 +297,13 @@ public:
     // host's. Zero-initialized while there is no host.
     Font getHostFont() const;
 
+    // The theme a component reads what it has not been told itself from: the
+    // host's (ComponentHost::setTheme), and defaultTheme() while there is no
+    // host. Asked for in paint(), never kept, so a theme the host is given later
+    // reaches every widget the next time it paints. Theme::get falls back to
+    // defaultTheme() for any key the host's does not hold.
+    const Theme& getHostTheme() const;
+
     bool isMouseOver() const;
 
     // The next component after this one that would take focus, in the order
@@ -299,9 +341,13 @@ public:
     const Vector<Layer*>& getLayers() const;
 
 private:
+    template <typename>
+    friend class SafePointer;
+
     friend class ComponentHost;
     friend class PathShape;
     friend class Layer;
+    friend class GPUComponent;
     friend class DragAndDropTarget;
     friend class DragAndDropContainer;
 
@@ -316,10 +362,20 @@ private:
 
     ComponentHost* findHost() const;
 
+    // What a SafePointer watches: made on first ask, so a component nobody
+    // points at safely costs nothing, and released as the destructor starts.
+    std::weak_ptr<bool> getLifetimeToken() const;
+    mutable std::shared_ptr<bool> lifetimeToken;
+
     // Asks the host for a frame without saying that anything this component
     // draws has changed -- what a move, a reorder or a visibility change needs,
     // all of which change the picture without changing any recording in it.
+    //
+    // Which is also the one place every change to a subtree passes through, so
+    // it is where a Layer capturing this component, or any ancestor of it, is
+    // told its texture is out of date. See Layer::setContent.
     void invalidateHost();
+    void markCapturingLayersStale();
 
     // Every ancestor is told that something below it has to be recorded, which
     // is what lets the frame skip a clean subtree without visiting it. Stops at
@@ -359,15 +415,23 @@ private:
     DragAndDropTarget* dropTarget = nullptr;
     DragAndDropContainer* dragContainer = nullptr;
 
+    // The layer drawing this subtree into its texture instead of the frame, or
+    // null. Set by Layer::setContent, and what tells the frame's own walk to
+    // step over the subtree.
+    Layer* capturingLayer = nullptr;
+
     // Set on a root only, by ComponentHost::setRootComponent. Everything else
     // walks up to find it, so a subtree moved between hosts needs no fixing up.
     ComponentHost* host = nullptr;
 
     bool visible = true;
     bool interceptsMouseClicks = false;
+    bool paintingIsUnclipped = false;
     bool wantsKeyboardFocus = false;
     bool mouseOver = false;
 
     eacp::Graphics::MouseCursor cursor = eacp::Graphics::MouseCursor::Default;
 };
 } // namespace eacp::UI
+
+#include "SafePointer.h"

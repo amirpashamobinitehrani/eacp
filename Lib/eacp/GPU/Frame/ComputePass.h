@@ -14,6 +14,7 @@ namespace eacp::GPU
 {
 class CommandBuffer;
 class ComputePipeline;
+class Sampler;
 
 // What an indirect dispatch reads out of a buffer: three threadgroup counts.
 // Both backends take exactly this, in this order and at this size - Metal's
@@ -71,6 +72,24 @@ public:
     ComputePass(const ComputePass&) = delete;
     ComputePass& operator=(const ComputePass&) = delete;
 
+    // What this pass was asked to record so far, counted call by call: every
+    // setPipeline, every dispatch (1D, 2D and 3D, the program forms included) and
+    // every indirect one, and every barrier(). It is what was asked for, not what
+    // the backend emitted - a barrier() in a Serial pass, which records nothing,
+    // still counts, and so does a dispatch the pass dropped for having no
+    // pipeline - so a test can pin a chain's structure on any backend.
+    struct Recorded
+    {
+        bool operator==(const Recorded&) const = default;
+
+        int pipelineSets = 0;
+        int dispatches = 0;
+        int indirectDispatches = 0;
+        int barriers = 0;
+    };
+
+    const Recorded& recorded() const;
+
     // Binds the pipeline and adopts the threadgroup it was compiled for, which
     // is what every dispatch below is then encoded with.
     void setPipeline(const ComputePipeline& pipeline);
@@ -98,7 +117,80 @@ public:
     void setInputTexture(const Texture& texture,
                          int slot,
                          TextureSampling sampling = {});
+
+    // The per-bind sampler form, as RenderPass::setFragmentTexture describes:
+    // MSL `sampler [[sampler(slot)]]`, HLSL
+    // `register(s<RenderPass::samplerRegisterBase + slot>)`, Vulkan the combined
+    // sampler at the texture's binding.
+    void setInputTexture(const Texture& texture, int slot, const Sampler& sampler);
     void setOutputTexture(const Texture& texture, int slot);
+
+    // One mip level of a texture, every slice of it, bound as the shader
+    // declares the kind - texture2d, texture2d_array, texture3d and so on, a
+    // volume with that level's images - so level 0 of the view is `level` of
+    // the texture. What a hi-Z or bloom downscale is built from: a kernel
+    // reading level N - 1 through setInputTextureLevel and writing level N
+    // through setOutputTextureLevel of the same texture, one dispatch per
+    // level.
+    //
+    // A level the texture lacks binds nothing, as does an output on a texture
+    // that is not computeWrite. On D3D12 a read and a write of one texture put
+    // one resource in two states, which its whole-resource tracking cannot
+    // express: there the lower level is read through a second
+    // setOutputTextureLevel and an RWTexture2D load. Metal and Vulkan take
+    // either.
+    void setInputTextureLevel(const Texture& texture,
+                              int slot,
+                              int level,
+                              TextureSampling sampling = {});
+    void setOutputTextureLevel(const Texture& texture, int slot, int level);
+
+    // A cube or a cube array as the plain 2D array of slices it is stored as -
+    // six faces, or layer * 6 + face - at one level, for a kernel that declared
+    // texture2d_array (Texture2DArray / RWTexture2DArray, sampler2DArray /
+    // image2DArray). That is how a kernel writes a cube at all, there being no
+    // writable cube type in any of the three languages, and how bgfx's
+    // IMAGE2D_ARRAY reaches one; the draw that samples the result binds the
+    // cube as a cube. A TwoDArray binds as setInputTextureLevel and
+    // setOutputTextureLevel would; a TwoD or ThreeD texture, or a level the
+    // texture lacks, binds nothing, as does an output that is not
+    // computeWrite.
+    void setInputTextureAsArray(const Texture& texture,
+                                int slot,
+                                int level = 0,
+                                TextureSampling sampling = {});
+    void setOutputTextureAsArray(const Texture& texture, int slot, int level = 0);
+
+    // The *depth buffer* of a render target, for a kernel to read: the compute
+    // sibling of RenderPass::setFragmentDepthTexture, on this pass's input
+    // texture slots and under the same rules. `renderTarget` is the colour
+    // texture the buffer belongs to, created with
+    // TextureDescriptor::sampleableDepth (one that was not binds nothing), and
+    // the pass that drew it has ended with DepthAction::Keep. The kernel
+    // declares the target's kind as a depth texture - depth2d,
+    // depth2d_array, depthcube in MSL, Texture2D<float> or Texture2DArray<float>
+    // in HLSL, sampler2D in GLSL - and reads it with read() or a sample, one
+    // float. Level 0 of every slice, as the fragment bind gives. What a hi-Z
+    // pyramid copies its first level out of, and what an ambient-occlusion
+    // pass starts from.
+    void setInputDepthTexture(const Texture& renderTarget,
+                              int slot,
+                              TextureSampling sampling = {});
+    void setInputDepthTexture(const Texture& renderTarget,
+                              int slot,
+                              const Sampler& sampler);
+
+    // One slice of that depth plane as a plain 2D depth texture, for a kernel
+    // that declares depth2d: the compute twin of
+    // RenderPass::setFragmentDepthTextureSlice, under its rules.
+    void setInputDepthTextureSlice(const Texture& renderTarget,
+                                   int slice,
+                                   int slot,
+                                   TextureSampling sampling = {});
+    void setInputDepthTextureSlice(const Texture& renderTarget,
+                                   int slice,
+                                   int slot,
+                                   const Sampler& sampler);
 
     // Uploads a small uniform block without a buffer object, like the render
     // pass's setVertexBytes. slot is the uniform-block slot (0 = first block).
@@ -235,24 +327,32 @@ public:
     // block rather than a tile.
     static constexpr int threadGroupSize3D = 4;
 
-    // How many storage buffers one kernel may bind. The D3D root signature
-    // declares a root SRV and a root UAV per slot below this and nothing above
-    // it, so a slot past the end binds nowhere at all - and a kernel reading an
-    // unbound buffer reads zeroes rather than failing, which is silent
-    // everywhere but in the picture. So the emitter asserts on a kernel that
-    // asks for more, rather than letting the last one fall off the end.
-    //
-    // Metal has no such ceiling short of uniformBase, its buffer indices being
-    // one flat space the uniform block sits on top of.
-    static constexpr int maxBufferSlots = 8;
+    // How many storage buffers a kernel may bind on every backend. The D3D12
+    // compute root signature declares a root SRV and a root UAV per slot below
+    // this and spends the rest of its 64 DWORDs on textures and samplers, so a
+    // slot past it binds nowhere there - and a kernel reading an unbound buffer
+    // reads zeroes rather than failing, which is silent everywhere but in the
+    // picture. So the emitter asserts on a kernel that asks for more, rather
+    // than letting the last one fall off the end, and the CPU interpreter's
+    // tables are this wide.
+    static constexpr int portableBufferSlots = 8;
+
+    // The most storage buffers any backend binds: Metal's buffer indices are one
+    // flat space with the uniform block at uniformBase on top, and Vulkan
+    // declares slots past portableBufferSlots above that block. A hand-written
+    // kernel may use slots up to Device::maxComputeBufferSlots(), which is this
+    // on Metal, this or the device's own storage-buffer limit on Vulkan, and
+    // portableBufferSlots on D3D12. A bind at a slot the device does not have is
+    // dropped.
+    static constexpr int maxBufferSlots = uniformBase;
 
     // The D3D shader register a kernel's first texture takes. A texture shares
     // the t/u register spaces with the storage buffers there, and the two slot
     // spaces are counted separately, so textures start above every buffer slot
-    // - the emitter writes these registers and the root signature declares
-    // them, and D3D12Types.h holds the two to the same number. Metal is
+    // D3D12 binds - the emitter writes these registers and the root signature
+    // declares them, and D3D12Types.h holds the two to the same number. Metal is
     // unaffected: its texture indices are a space of their own.
-    static constexpr int textureRegisterBase = maxBufferSlots;
+    static constexpr int textureRegisterBase = portableBufferSlots;
 
 private:
     friend class CommandBuffer;
@@ -286,28 +386,20 @@ private:
     // adopts the encoder openTimedEncoder makes for the next.
     void beginTimedDispatch(std::string_view label);
 
+    // The backend half of each call above, one per platform file; the public
+    // forms count and forward, so the counting is written once.
+    void encodePipeline(const ComputePipeline& pipeline);
+    void encodeDispatch(int count);
+    void encodeDispatch(int width, int height);
+    void encodeDispatch(int width, int height, int depth);
+    void encodeDispatchIndirect(const Buffer& arguments, std::int64_t offsetInBytes);
+    void encodeBarrier();
+
     // The group each dispatch is encoded with: the bound pipeline's own, or the
     // stock shape for the dispatch's rank when it carried none.
-    constexpr ThreadGroupShape groupFor1D() const
-    {
-        return boundGroup.isSet() ? boundGroup
-                                  : ThreadGroupShape {threadGroupWidth, 1, 1};
-    }
-
-    constexpr ThreadGroupShape groupFor2D() const
-    {
-        return boundGroup.isSet()
-                   ? boundGroup
-                   : ThreadGroupShape {threadGroupSize2D, threadGroupSize2D, 1};
-    }
-
-    constexpr ThreadGroupShape groupFor3D() const
-    {
-        return boundGroup.isSet() ? boundGroup
-                                  : ThreadGroupShape {threadGroupSize3D,
-                                                      threadGroupSize3D,
-                                                      threadGroupSize3D};
-    }
+    ThreadGroupShape groupFor1D() const;
+    ThreadGroupShape groupFor2D() const;
+    ThreadGroupShape groupFor3D() const;
 
     ThreadGroupShape boundGroup;
 
@@ -325,6 +417,8 @@ private:
     std::function<void*(std::string_view)> openTimedEncoder = [](std::string_view)
     { return (void*) nullptr; };
     std::string timedPrefix;
+
+    Recorded counts;
 
     struct Native;
     Pimpl<Native> impl;

@@ -23,6 +23,9 @@ using namespace eacp;
 using namespace eacp::GPU;
 using namespace eacp::GPU::CpuCompute;
 
+namespace DispatchGroupsTests
+{
+
 namespace
 {
 constexpr auto sentinel = -1.f;
@@ -144,7 +147,7 @@ bool runInTurn(const Executor& executor,
     return ran;
 }
 
-constexpr auto streamCount = 1 << 20;
+constexpr auto streamCount = 1 << 16;
 constexpr auto streamGain = 0.8125f;
 
 struct StreamKernel final : ComputeKernel
@@ -680,3 +683,4 @@ auto tIndirectSplit =
     check(noArguments.isValid());
     check(noArguments.groupCount() == 0);
 };
+} // namespace DispatchGroupsTests

@@ -38,6 +38,8 @@ using namespace nano;
 using namespace eacp;
 using namespace eacp::GPU;
 
+namespace CompressedTextureTests
+{
 namespace
 {
 struct QuadVertex
@@ -46,9 +48,12 @@ struct QuadVertex
     float uv[2];
 };
 } // namespace
+} // namespace CompressedTextureTests
 
-EACP_SHADER_VALUE(QuadVertex, Float2)
+EACP_SHADER_VALUE(CompressedTextureTests::QuadVertex, Float2)
 
+namespace CompressedTextureTests
+{
 namespace
 {
 // The whole texture across the whole viewport, uv running 0..1 left to right.
@@ -860,12 +865,10 @@ auto tCompressedCube = test("Compressed/aCubeOfBlocks") = []
         check(isColor(sampleAlong(cube, 0.f, 0.f, -1.f), 1.f, 0.f, 1.f));
     }
 
-    // A supplied chain on a cube is the one combination refused: the faces would
-    // each carry one, and nothing here can hold a cube's level selection still
-    // long enough to say which level a direction read. See
-    // TextureDescriptor::mipLevels.
+    // A cube takes a supplied chain like any other kind (G31), so the refusal
+    // left is the one every kind has: more levels than the size holds.
     auto withChain = descriptor;
-    withChain.mipLevels = 3;
+    withChain.mipLevels = mipLevelCount(descriptor.width, descriptor.height) + 1;
 
     check(!Device::shared().makeTexture(withChain, faces).isValid());
 };
@@ -971,3 +974,4 @@ auto tCompressedRegionAndRead = test("Compressed/regionAndReadAreNoOps") = []
     for (auto byte: destination)
         check(byte == 0xCD);
 };
+} // namespace CompressedTextureTests

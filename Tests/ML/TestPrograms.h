@@ -8,21 +8,65 @@
 
 #include <algorithm>
 #include <cmath>
-#include <random>
+#include <cstdint>
+#include <utility>
 
 namespace TestPrograms
 {
 using eacp::Vector;
 using namespace eacp::ML;
 
+// splitmix64 through Box-Muller: the real models need tens of millions of
+// values, which std::normal_distribution is slow to make, and its output
+// differs between standard libraries where this is the same everywhere.
+class SeededNormal
+{
+public:
+    explicit SeededNormal(unsigned seed)
+        : state(seed)
+    {
+    }
+
+    std::pair<float, float> nextPair()
+    {
+        constexpr auto twoPi = 6.283185307179586;
+        auto radius = std::sqrt(-2.0 * std::log(1.0 - nextUniform()));
+        auto angle = twoPi * nextUniform();
+        return {(float) (radius * std::cos(angle)),
+                (float) (radius * std::sin(angle))};
+    }
+
+private:
+    double nextUniform()
+    {
+        state += 0x9e3779b97f4a7c15ull;
+        auto mixed = state;
+        mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ull;
+        mixed = (mixed ^ (mixed >> 27)) * 0x94d049bb133111ebull;
+        mixed ^= mixed >> 31;
+        return (double) (mixed >> 11) * 0x1.0p-53;
+    }
+
+    std::uint64_t state;
+};
+
 inline Vector<float> seededValues(int count, unsigned seed, float spread)
 {
-    auto engine = std::mt19937 {seed};
-    auto normal = std::normal_distribution<float> {0.0f, spread};
+    auto normal = SeededNormal {seed};
     auto values = Vector<float> {};
+    values.reserve(count);
 
-    for (auto i = 0; i < count; ++i)
-        values.add(halfToFloat(floatToHalf(normal(engine))));
+    auto addRounded = [&values, spread](float value)
+    { values.add(halfToFloat(floatToHalf(value * spread))); };
+
+    while (values.size() < count)
+    {
+        auto [first, second] = normal.nextPair();
+        addRounded(first);
+
+        if (values.size() < count)
+            addRounded(second);
+    }
 
     return values;
 }
@@ -48,6 +92,23 @@ inline Package elementwiseChain(int rows, int columns, DType type = DType::float
 {
     auto graph = Graph {};
     auto x = graph.input("x", {rows, columns}, type);
+
+    auto body = [](const eacp::GPU::Float& value)
+    { return eacp::GPU::tanh(value * 0.5f + 0.25f); };
+
+    graph.output(graph.apply(x, body), "y");
+    return graph.build();
+}
+
+// The same chain over an input whose row count is enumerated, so that a load
+// under units that leave only the CPU is refused where that path traps.
+inline Package enumeratedElementwiseChain(int rows, int columns)
+{
+    auto graph = Graph {};
+    auto x = graph.input("x",
+                         {rows, columns},
+                         {{rows, columns}, {rows / 2, columns}},
+                         DType::float16);
 
     auto body = [](const eacp::GPU::Float& value)
     { return eacp::GPU::tanh(value * 0.5f + 0.25f); };

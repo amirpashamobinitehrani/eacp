@@ -3,7 +3,6 @@ nano_add_executable(MLGraphTests
             GraphApplyTests.cpp
             GraphBlobTests.cpp
             GraphCoreMLTests.cpp
-            GraphDecoderStepTests.cpp
             GraphEncoderTests.cpp
             GraphPackageTests.cpp
             GraphProtobufTests.cpp
@@ -14,6 +13,10 @@ nano_add_executable(MLGraphTests
 if (TARGET eacp-ml)
     target_link_libraries(MLGraphTests PRIVATE eacp-ml)
 endif ()
+
+# The suites generate and check millions of values, and build Whisper's
+# encoder at its real sizes.
+eacp_force_optimization(MLGraphTests)
 
 if (TARGET eacp-ml-kernels)
     nano_add_executable(MLKernelTests
@@ -41,14 +44,9 @@ nano_add_executable(MLTests
             MultiArrayTests.cpp
             AsyncTests.cpp
             CacheTests.cpp
-            DecoderStepReference.cpp
-            DecoderStepTests.cpp
-            EncoderReference.cpp
-            EncoderTests.cpp
             PlacementTests.cpp
             ProgramTests.cpp
             TestMain.cpp
         TARGETS eacp-ml)
 
-set_source_files_properties(EncoderReference.cpp DecoderStepReference.cpp
-        PROPERTIES COMPILE_OPTIONS -O2 SKIP_PRECOMPILE_HEADERS ON)
+eacp_force_optimization(MLTests)

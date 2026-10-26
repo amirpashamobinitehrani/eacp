@@ -50,6 +50,72 @@ VkFormat toVkVertexFormat(VertexFormat format)
             return VK_FORMAT_R16G16_SNORM;
         case VertexFormat::Short4Norm:
             return VK_FORMAT_R16G16B16A16_SNORM;
+
+        // Every format here is one the spec makes mandatory for
+        // VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT. A2B10G10R10 names its channels
+        // from the top bit down, so R is in the low ten bits as on the others.
+        case VertexFormat::UByte:
+            return VK_FORMAT_R8_UINT;
+        case VertexFormat::UByte2:
+            return VK_FORMAT_R8G8_UINT;
+        case VertexFormat::UByte4:
+            return VK_FORMAT_R8G8B8A8_UINT;
+        case VertexFormat::UByteNorm:
+            return VK_FORMAT_R8_UNORM;
+        case VertexFormat::UByte2Norm:
+            return VK_FORMAT_R8G8_UNORM;
+        case VertexFormat::Byte:
+            return VK_FORMAT_R8_SINT;
+        case VertexFormat::Byte2:
+            return VK_FORMAT_R8G8_SINT;
+        case VertexFormat::Byte4:
+            return VK_FORMAT_R8G8B8A8_SINT;
+        case VertexFormat::ByteNorm:
+            return VK_FORMAT_R8_SNORM;
+        case VertexFormat::Byte2Norm:
+            return VK_FORMAT_R8G8_SNORM;
+        case VertexFormat::Byte4Norm:
+            return VK_FORMAT_R8G8B8A8_SNORM;
+        case VertexFormat::UShort:
+            return VK_FORMAT_R16_UINT;
+        case VertexFormat::UShort2:
+            return VK_FORMAT_R16G16_UINT;
+        case VertexFormat::UShort4:
+            return VK_FORMAT_R16G16B16A16_UINT;
+        case VertexFormat::UShortNorm:
+            return VK_FORMAT_R16_UNORM;
+        case VertexFormat::UShort2Norm:
+            return VK_FORMAT_R16G16_UNORM;
+        case VertexFormat::UShort4Norm:
+            return VK_FORMAT_R16G16B16A16_UNORM;
+        case VertexFormat::Short:
+            return VK_FORMAT_R16_SINT;
+        case VertexFormat::Short2:
+            return VK_FORMAT_R16G16_SINT;
+        case VertexFormat::Short4:
+            return VK_FORMAT_R16G16B16A16_SINT;
+        case VertexFormat::ShortNorm:
+            return VK_FORMAT_R16_SNORM;
+        case VertexFormat::Half:
+            return VK_FORMAT_R16_SFLOAT;
+        case VertexFormat::UInt1010102Norm:
+            return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case VertexFormat::UInt:
+            return VK_FORMAT_R32_UINT;
+        case VertexFormat::UInt2:
+            return VK_FORMAT_R32G32_UINT;
+        case VertexFormat::UInt3:
+            return VK_FORMAT_R32G32B32_UINT;
+        case VertexFormat::UInt4:
+            return VK_FORMAT_R32G32B32A32_UINT;
+        case VertexFormat::Int:
+            return VK_FORMAT_R32_SINT;
+        case VertexFormat::Int2:
+            return VK_FORMAT_R32G32_SINT;
+        case VertexFormat::Int3:
+            return VK_FORMAT_R32G32B32_SINT;
+        case VertexFormat::Int4:
+            return VK_FORMAT_R32G32B32A32_SINT;
     }
 
     return VK_FORMAT_R32G32B32_SFLOAT;
@@ -160,31 +226,6 @@ VkFrontFace toVkFrontFace(Winding winding)
                                                 : VK_FRONT_FACE_CLOCKWISE;
 }
 
-VkCompareOp toVkCompareOp(CompareFunction compare)
-{
-    switch (compare)
-    {
-        case CompareFunction::Never:
-            return VK_COMPARE_OP_NEVER;
-        case CompareFunction::Less:
-            return VK_COMPARE_OP_LESS;
-        case CompareFunction::LessEqual:
-            return VK_COMPARE_OP_LESS_OR_EQUAL;
-        case CompareFunction::Equal:
-            return VK_COMPARE_OP_EQUAL;
-        case CompareFunction::NotEqual:
-            return VK_COMPARE_OP_NOT_EQUAL;
-        case CompareFunction::GreaterEqual:
-            return VK_COMPARE_OP_GREATER_OR_EQUAL;
-        case CompareFunction::Greater:
-            return VK_COMPARE_OP_GREATER;
-        case CompareFunction::Always:
-            return VK_COMPARE_OP_ALWAYS;
-    }
-
-    return VK_COMPARE_OP_LESS_OR_EQUAL;
-}
-
 VkStencilOp toVkStencilOp(StencilOp op)
 {
     switch (op)
@@ -291,13 +332,12 @@ VkColorComponentFlags toVkWriteMask(const ColorWriteMask& mask)
     return value;
 }
 
-VkPipelineColorBlendAttachmentState
-    makeBlendAttachment(const RenderPipelineDescriptor& from)
+VkPipelineColorBlendAttachmentState makeBlendAttachment(const ColorTargetState& from)
 {
     VkPipelineColorBlendAttachmentState attachment = {};
-    attachment.colorWriteMask = toVkWriteMask(from.colorWriteMask);
+    attachment.colorWriteMask = toVkWriteMask(from.writeMask);
 
-    const auto blend = from.blend ? *from.blend : blendStateFor(from.blendMode);
+    const auto blend = resolvedBlend(from);
 
     if (!blend.enabled)
         return attachment;
@@ -313,6 +353,30 @@ VkPipelineColorBlendAttachmentState
     return attachment;
 }
 
+bool sameBlend(const VkPipelineColorBlendAttachmentState& a,
+               const VkPipelineColorBlendAttachmentState& b)
+{
+    return a.blendEnable == b.blendEnable
+           && a.srcColorBlendFactor == b.srcColorBlendFactor
+           && a.dstColorBlendFactor == b.dstColorBlendFactor
+           && a.colorBlendOp == b.colorBlendOp
+           && a.srcAlphaBlendFactor == b.srcAlphaBlendFactor
+           && a.dstAlphaBlendFactor == b.dstAlphaBlendFactor
+           && a.alphaBlendOp == b.alphaBlendOp
+           && a.colorWriteMask == b.colorWriteMask;
+}
+
+bool blendsAlike(const std::array<VkPipelineColorBlendAttachmentState,
+                                  maxColorAttachments>& attachments,
+                 int count)
+{
+    for (auto index = 1; index < count; ++index)
+        if (!sameBlend(attachments[index], attachments[0]))
+            return false;
+
+    return true;
+}
+
 VkPipelineRasterizationStateCreateInfo
     makeRasterizationState(const RenderPipelineDescriptor& from)
 {
@@ -322,6 +386,20 @@ VkPipelineRasterizationStateCreateInfo
     state.cullMode = toVkCullMode(from.cullMode);
     state.frontFace = toVkFrontFace(from.frontFace);
     state.lineWidth = 1.0f;
+
+    const auto bias = appliedDepthBias(from);
+
+    if (!bias.isNone())
+    {
+        state.depthBiasEnable = VK_TRUE;
+        state.depthBiasConstantFactor = bias.constant;
+        state.depthBiasSlopeFactor = bias.slopeScale;
+
+        // A clamp is a device feature here and nowhere else; without it the
+        // bias is applied unclamped rather than the pipeline refused.
+        if (getVulkanShared().getFeatures().depthBiasClamp == VK_TRUE)
+            state.depthBiasClamp = bias.clamp;
+    }
 
     return state;
 }
@@ -356,6 +434,7 @@ struct RenderPipeline::Native
         : topology(descriptor.topology)
         , cullMode(descriptor.cullMode)
         , frontFace(descriptor.frontFace)
+        , depthBias(appliedDepthBias(descriptor))
     {
         state.topology = toVkTopology(descriptor.topology);
         state.cullMode = toVkCullMode(descriptor.cullMode);
@@ -364,7 +443,20 @@ struct RenderPipeline::Native
         state.depth = descriptor.depth;
         state.stencil = descriptor.stencil;
         state.sampleCount = descriptor.sampleCount > 1 ? descriptor.sampleCount : 1;
-        state.colorFormat = toVkFormat(descriptor.colorFormat);
+        state.colorCount = descriptor.colorTargetCount();
+
+        if (state.colorCount > maxColorAttachments)
+        {
+            LOG("Vulkan: a pipeline writing ",
+                state.colorCount,
+                " colour targets is refused; the most is ",
+                maxColorAttachments);
+            return;
+        }
+
+        for (auto index = 0; index < state.colorCount; ++index)
+            state.colorFormats[index] =
+                toVkFormat(descriptor.colorTarget(index).format);
 
         if (!device.isValid() || descriptor.library == nullptr)
             return;
@@ -388,7 +480,8 @@ struct RenderPipeline::Native
             static_cast<VulkanShaderProgram*>(descriptor.library->nativeLibrary());
 
         if (program == nullptr || program->vertex == VK_NULL_HANDLE
-            || program->fragment == VK_NULL_HANDLE)
+            || (descriptor.library->hasFragment()
+                && program->fragment == VK_NULL_HANDLE))
             return;
 
         build(*program, layouts, descriptor);
@@ -452,12 +545,26 @@ struct RenderPipeline::Native
             static_cast<VkSampleCountFlagBits>(state.sampleCount);
 
         auto depthStencil = makeDepthStencilState(descriptor);
-        auto attachment = makeBlendAttachment(descriptor);
+        const auto hasFragment = program.fragment != VK_NULL_HANDLE;
+        auto attachments =
+            std::array<VkPipelineColorBlendAttachmentState, maxColorAttachments> {};
+
+        for (auto index = 0; index < state.colorCount; ++index)
+            attachments[index] = makeBlendAttachment(
+                writtenColorTarget(descriptor, index, hasFragment));
+
+        if (!blendsAlike(attachments, state.colorCount)
+            && !getVulkanShared().getFeatures().independentBlend)
+        {
+            LOG("Vulkan: this device has no independentBlend, so a pipeline "
+                "whose colour targets blend differently is refused");
+            return;
+        }
 
         VkPipelineColorBlendStateCreateInfo blend = {};
         blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        blend.attachmentCount = 1;
-        blend.pAttachments = &attachment;
+        blend.attachmentCount = static_cast<std::uint32_t>(state.colorCount);
+        blend.pAttachments = attachments.data();
 
         const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT,
                                                 VK_DYNAMIC_STATE_SCISSOR,
@@ -475,8 +582,9 @@ struct RenderPipeline::Native
 
         VkPipelineRenderingCreateInfo rendering = {};
         rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-        rendering.colorAttachmentCount = 1;
-        rendering.pColorAttachmentFormats = &state.colorFormat;
+        rendering.colorAttachmentCount =
+            static_cast<std::uint32_t>(state.colorCount);
+        rendering.pColorAttachmentFormats = state.colorFormats.data();
         rendering.depthAttachmentFormat =
             hasDepthAttachment ? depthAttachmentFormat(descriptor.stencil)
                                : VK_FORMAT_UNDEFINED;
@@ -489,7 +597,8 @@ struct RenderPipeline::Native
         if (getVulkanShared().usesRenderPasses())
         {
             info.renderPass = getVulkanShared().compatibleRenderPass(
-                state.colorFormat,
+                std::span {state.colorFormats.data(),
+                           static_cast<std::size_t>(state.colorCount)},
                 state.sampleCount,
                 rendering.depthAttachmentFormat,
                 descriptor.stencil);
@@ -501,7 +610,7 @@ struct RenderPipeline::Native
         {
             info.pNext = &rendering;
         }
-        info.stageCount = 2;
+        info.stageCount = hasFragment ? 2 : 1;
         info.pStages = stages;
         info.pVertexInputState = &vertexInput;
         info.pInputAssemblyState = &inputAssembly;
@@ -533,6 +642,7 @@ struct RenderPipeline::Native
     PrimitiveTopology topology = PrimitiveTopology::Triangles;
     CullMode cullMode = CullMode::None;
     Winding frontFace = Winding::CounterClockwise;
+    DepthBias depthBias;
     VulkanRenderPipeline state;
 };
 
@@ -560,6 +670,11 @@ CullMode RenderPipeline::cullMode() const
 Winding RenderPipeline::frontFace() const
 {
     return impl->frontFace;
+}
+
+DepthBias RenderPipeline::depthBias() const
+{
+    return impl->depthBias;
 }
 
 void* RenderPipeline::nativeState() const

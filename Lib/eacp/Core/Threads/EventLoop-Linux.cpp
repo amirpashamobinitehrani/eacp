@@ -1,4 +1,5 @@
 #include "EventLoop-Linux.h"
+#include "CallAfter.h"
 #include "EventLoopWait-Linux.h"
 #include "ThreadUtils-Linux.h"
 #include "../Platform/Platform.h"
@@ -507,11 +508,17 @@ bool EventLoop::runFor(Time::MS timeout)
     initMainThread();
 
     auto& loop = getLoop();
-    loop.running = true;
+    auto wasRunning = loop.running.exchange(true);
 
     auto advertised = RootLoopScope {loop};
     auto scope = PumpScope {loop};
     auto deadline = Time::Deadline {timeout};
+
+    auto timedOut = [&]
+    {
+        loop.running = wasRunning;
+        return false;
+    };
 
     while (loop.running)
     {
@@ -521,12 +528,12 @@ bool EventLoop::runFor(Time::MS timeout)
             break;
 
         if (deadline.expired())
-            return false;
+            return timedOut();
 
         auto wait = waitForLoopActivity(loop, (int) deadline.remaining().count);
 
         if (wait == WaitResult::TimedOut)
-            return false;
+            return timedOut();
 
         if (wait == WaitResult::Failed)
             break;
@@ -623,6 +630,22 @@ void attachCurrentThreadAsMain()
     loop.hosted = true;
     attachToRootLoop(loop);
     loop.waker.wake();
+}
+
+// The root copy's pointer into this one goes now rather than with the LoopState
+// destructor, which runs only once the image's statics do. The descriptor stays
+// open: a foreign host may still hold it until it removes its handler, and it
+// reads nothing more from it.
+void detachCurrentThreadAsMain()
+{
+    stopCallAfterScheduler();
+
+    auto& loop = getLoop();
+    loop.detachFromRootLoop();
+    loop.hosted = false;
+
+    auto lock = std::lock_guard(loop.mutex);
+    loop.queue.clear();
 }
 
 void stopProcessRootLoop()

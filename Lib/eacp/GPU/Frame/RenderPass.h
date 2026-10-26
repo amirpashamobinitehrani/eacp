@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../Buffer/Buffer.h"
+#include "IndirectDraw.h"
+#include "OcclusionQueries.h"
 #include "../Texture/Texture.h"
 
 #include <eacp/Core/Utils/Containers.h>
@@ -8,6 +10,7 @@
 namespace eacp::GPU
 {
 class RenderPipeline;
+class Sampler;
 
 // Records draw commands for a single render pass (MTLRenderCommandEncoder on
 // Metal). Ends the encoder automatically on destruction. Obtained from
@@ -49,7 +52,13 @@ public:
     // that leaves the render target (Metal API validation aborts), so a caller
     // scrolling a region partly off-screen would otherwise have to clamp by
     // hand at every call site.
-    explicit RenderPass(void* encoder, int targetWidth = 0, int targetHeight = 0);
+    //
+    // occlusionQueries is the set the pass's descriptor named, already checked
+    // valid by Frame, or null.
+    explicit RenderPass(void* encoder,
+                        int targetWidth = 0,
+                        int targetHeight = 0,
+                        OcclusionQueries* occlusionQueries = nullptr);
     ~RenderPass();
 
     RenderPass(const RenderPass&) = delete;
@@ -157,6 +166,15 @@ public:
                             int slot = 0,
                             TextureSampling sampling = {});
 
+    // The same bind with the sampler chosen here rather than by the shader, for
+    // a shader that takes its sampler per draw: an MSL `sampler [[sampler(slot)]]`
+    // argument, an HLSL `SamplerState : register(s<samplerRegisterBase + slot>)`,
+    // or on Vulkan the combined `sampler2D` at the texture's own binding. A
+    // shader built with the codegen layer samples the way it declared on D3D12
+    // whatever is bound here. An invalid sampler binds nothing.
+    void
+        setFragmentTexture(const Texture& texture, int slot, const Sampler& sampler);
+
     // Binds the *depth buffer* of a render target to the fragment stage, on the
     // same slot space and with the same sampling rule as the call above. The
     // shader's matching declaration is ShaderBuilder::depthTexture, whose
@@ -178,6 +196,67 @@ public:
     void setFragmentDepthTexture(const Texture& renderTarget,
                                  int slot = 0,
                                  TextureSampling sampling = {});
+
+    // The per-bind sampler form, as for setFragmentTexture. A comparison
+    // sampler (SamplerDescriptor::compare) is what a shadow lookup binds here.
+    void setFragmentDepthTexture(const Texture& renderTarget,
+                                 int slot,
+                                 const Sampler& sampler);
+
+    // The vertex-stage siblings of the four binds above, for a vertex shader
+    // that samples - a height map displacing a terrain grid, a shadow map read
+    // per vertex. Metal binds the vertex function's texture(slot) and
+    // sampler(slot), an index space of its own beside the fragment one. On
+    // D3D12 and Vulkan a slot is one binding both stages see - t<slot> with its
+    // sampler registers, combined image sampler 8 + slot - so a bind here and
+    // a fragment bind at the same slot are the same bind, the last one winning;
+    // Device::stagesShareTextureSlots() says which model the device has.
+    // Slots run to Device::maxTextureSlots(), and a bind past it is dropped.
+    void setVertexTexture(const Texture& texture,
+                          int slot = 0,
+                          TextureSampling sampling = {});
+
+    void setVertexTexture(const Texture& texture, int slot, const Sampler& sampler);
+
+    void setVertexDepthTexture(const Texture& renderTarget,
+                               int slot = 0,
+                               TextureSampling sampling = {});
+
+    void setVertexDepthTexture(const Texture& renderTarget,
+                               int slot,
+                               const Sampler& sampler);
+
+    // One slice of a target's depth plane - a layer of an array target, a
+    // face of a cube (layer * 6 + face on a cube array) - bound as a plain 2D
+    // depth texture, level 0, for a shader that declares depth2d (Texture2D
+    // <float>, sampler2D) rather than the array or cube the whole-plane binds
+    // above hand it. Slice 0 of a 2D target is the same bind as those. A slice
+    // the plane lacks, or a target without sampleableDepth, binds nothing.
+    //
+    // Metal binds a 2D view of the slice, Vulkan a 2D image view of the
+    // layer, each made on first use; D3D12 a one-slice Texture2DArray SRV,
+    // since a TEXTURE2D view cannot start past slice 0 - an HLSL Texture2D
+    // reads it where the driver lets the two dimensions differ, and a strict
+    // one wants the shader to declare Texture2DArray and read layer 0.
+    void setFragmentDepthTextureSlice(const Texture& renderTarget,
+                                      int slice,
+                                      int slot = 0,
+                                      TextureSampling sampling = {});
+
+    void setFragmentDepthTextureSlice(const Texture& renderTarget,
+                                      int slice,
+                                      int slot,
+                                      const Sampler& sampler);
+
+    void setVertexDepthTextureSlice(const Texture& renderTarget,
+                                    int slice,
+                                    int slot = 0,
+                                    TextureSampling sampling = {});
+
+    void setVertexDepthTextureSlice(const Texture& renderTarget,
+                                    int slice,
+                                    int slot,
+                                    const Sampler& sampler);
 
     // Binds a Storage buffer for indexed reads in a shader stage - the thing a
     // vertex attribute stream is not. setVertexBuffer feeds the input assembler,
@@ -295,6 +374,62 @@ public:
                               int firstIndex = 0,
                               int firstInstance = 0,
                               int baseVertex = 0);
+
+    // A draw whose counts the GPU decided: a DrawArguments record read out of
+    // `arguments` at `offset`, typically written by a kernel earlier in the
+    // frame. Any buffer works - a Storage buffer is what a kernel writes - and
+    // the transition a kernel's write needs before it is read as arguments is
+    // made here. The offset must be a multiple of four and leave a whole record
+    // in the buffer; one that does not is refused with a trace.
+    void drawIndirect(const Buffer& arguments, std::int64_t offset = 0);
+
+    // drawCount records, stride bytes apart (zero meaning tightly packed): one
+    // vkCmdDrawIndirect or ExecuteIndirect, a loop of single draws on Metal. A
+    // record with instanceCount or vertexCount zero draws nothing.
+    void drawIndirect(const Buffer& arguments,
+                      std::int64_t offset,
+                      int drawCount,
+                      std::int64_t stride = 0);
+
+    // The same with the number of draws also on the GPU: the first uint32 at
+    // countOffset in `count`, clamped to maxDrawCount. Only where
+    // Device::supportsIndirectCount() says so - Vulkan's vkCmdDrawIndirectCount
+    // and D3D12's ExecuteIndirect with a count buffer; Metal has no such draw,
+    // and the call is refused there with a trace.
+    void drawIndirectCount(const Buffer& arguments,
+                           std::int64_t offset,
+                           const Buffer& count,
+                           std::int64_t countOffset,
+                           int maxDrawCount,
+                           std::int64_t stride = 0);
+
+    // The indexed forms, reading DrawIndexedArguments. indices is bound as in
+    // drawIndexed, and each record's firstIndex counts from its start.
+    void drawIndexedIndirect(const Buffer& indices,
+                             IndexFormat format,
+                             const Buffer& arguments,
+                             std::int64_t offset = 0);
+
+    void drawIndexedIndirect(const BufferRange& indices,
+                             IndexFormat format,
+                             const Buffer& arguments,
+                             std::int64_t offset = 0);
+
+    void drawIndexedIndirect(const BufferRange& indices,
+                             IndexFormat format,
+                             const Buffer& arguments,
+                             std::int64_t offset,
+                             int drawCount,
+                             std::int64_t stride = 0);
+
+    void drawIndexedIndirectCount(const BufferRange& indices,
+                                  IndexFormat format,
+                                  const Buffer& arguments,
+                                  std::int64_t offset,
+                                  const Buffer& count,
+                                  std::int64_t countOffset,
+                                  int maxDrawCount,
+                                  std::int64_t stride = 0);
 
     // Binds a program's uniform block to the stage that reads it, and to no
     // other. The program answers per stage from the same walk that decided
@@ -420,6 +555,26 @@ public:
             drawInstanced(program.vertexCount(), instanceCount, 0, firstInstance);
     }
 
+    // Counts the samples that the draws from here to endOcclusionQuery() pass
+    // the depth and stencil tests with into query `index` of the set this
+    // pass's descriptor named (RenderPassDescriptor::occlusionQueries). The
+    // result is written as the pass ends and read off the set once the frame
+    // has finished - see OcclusionQueries.
+    //
+    // One query is open at a time, and one index is begun at most once per
+    // pass. Refused with a trace, counting nothing: a pass whose descriptor
+    // named no valid set, an index the set lacks, a query begun while another
+    // is open, and an index this pass already counted. A query still open when
+    // the pass ends is ended there.
+    //
+    // A query around no draws, or around draws that are all hidden, counts
+    // zero; a draw skipped for want of a valid pipeline counts nothing either.
+    void beginOcclusionQuery(int index,
+                             OcclusionMode mode = OcclusionMode::SampleCount);
+
+    // Closes the open query. Nothing to do when none is open.
+    void endOcclusionQuery();
+
     void end();
 
     // The Metal buffer index the first uniform block binds to. Vertex buffers
@@ -444,6 +599,18 @@ public:
     // is not below maxTextureSlots.
     static constexpr int bufferRegisterBase = 8;
 
+    // The most texture slots a stage has on any backend: Metal's sixteen
+    // sampler indices, and the sixteen combined image samplers Vulkan places at
+    // bindings 8 to 23 under the storage buffers. D3D12 has eight
+    // (maxTextureSlots in Codegen/ShaderBindings.h, which the codegen layer and
+    // compute also keep to). Device::maxTextureSlots() is the device's own.
+    static constexpr int maxStageTextureSlots = 16;
+
+    // The D3D12 sampler register a per-bind sampler for texture slot n sits at:
+    // s<samplerRegisterBase + n>. Above the static samplers the codegen layer's
+    // TextureSampling declarations use, which hold s0..s7.
+    static constexpr int samplerRegisterBase = 8;
+
 private:
     // Flushes every participant, once. Called by end() on both backends before
     // the encoder closes, so a participant's draws still land on this pass.
@@ -454,6 +621,27 @@ private:
     // participant gets its last chance to draw.
     Vector<Participant*> participants;
     bool drained = false;
+
+    // The occlusion bookkeeping, shared by the backends like the participants:
+    // which set the pass counts into, the query open now, and every query the
+    // pass has begun, which D3D12 and Vulkan resolve once the pass has ended.
+    // Each backend supplies the three native steps.
+    struct UsedQuery
+    {
+        int index = 0;
+        OcclusionMode mode = OcclusionMode::SampleCount;
+    };
+
+    void nativeBeginOcclusionQuery(int index, OcclusionMode mode);
+    void nativeEndOcclusionQuery(int index, OcclusionMode mode);
+
+    // Records the copy of every used query's result out to the set, after the
+    // encoder has closed. Nothing on Metal, whose pass writes them itself.
+    void resolveOcclusionQueries();
+
+    OcclusionQueries* occlusionQueries = nullptr;
+    Vector<UsedQuery> usedQueries;
+    int openQuery = -1;
 
     struct Native;
     Pimpl<Native> impl;

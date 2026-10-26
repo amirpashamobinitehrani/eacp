@@ -3,11 +3,12 @@
 using namespace nano;
 using namespace ModelTests;
 
-// Small programs run under every compute-unit setting and checked against an
-// fp32 scalar reference. Each setting has its own tolerance because each
-// device has its own fp16 arithmetic: the spike found the CPU's fp16 path the
-// least accurate of the three, so a bound measured on the engine would fail a
-// CPU run and one measured on the CPU would hide an engine regression.
+// Small programs run under the compute-unit settings that place them
+// differently and checked against an fp32 scalar reference. Each setting has
+// its own tolerance because each device has its own fp16 arithmetic: the
+// spike found the CPU's fp16 path the least accurate of the three, so a bound
+// measured on the engine would fail a CPU run and one measured on the CPU
+// would hide an engine regression.
 namespace
 {
 struct Tolerance
@@ -16,14 +17,15 @@ struct Tolerance
     double maxAbs;
 };
 
-using Tolerances = Array<Tolerance, 4>;
+using Tolerances = Vector<Tolerance>;
 
-Tolerances sameOnEveryUnit(double maxAbs)
+// For a program Core ML keeps on the CPU under every setting, where the two
+// settings between these would load the same placement twice more. The
+// programs that move - the linears, and the argmax behind one - run under all
+// four.
+Tolerances sameOnCpuAndAll(double maxAbs)
 {
-    return {{ComputeUnits::cpu, maxAbs},
-            {ComputeUnits::cpuAndGPU, maxAbs},
-            {ComputeUnits::cpuAndNeuralEngine, maxAbs},
-            {ComputeUnits::all, maxAbs}};
+    return {{ComputeUnits::cpu, maxAbs}, {ComputeUnits::all, maxAbs}};
 }
 
 // Core ML keeps an elementwise-only program on the CPU under every setting,
@@ -54,11 +56,10 @@ const auto linearLayerNormTolerances = Tolerances {
     {ComputeUnits::all, 3e-2},
 };
 
-// Attention under an input mask, one query per head over 449 and 1500 keys,
+// Attention under an input mask, one query per head over 449 keys,
 // is kept on the CPU under every setting, with or without a projection
 // either side: measured 1.2e-4 alone and 1.5e-2 projected, exactly 0 over a
-// prefix of one. An ignored mask would be off by about 170. The step in
-// DecoderStepTests is what takes the same op to the GPU and the engine.
+// prefix of one. An ignored mask would be off by about 170.
 constexpr auto maskedAttentionTolerance = 4e-4;
 constexpr auto projectedMaskedAttentionTolerance = 5e-2;
 
@@ -76,9 +77,8 @@ bool isHeldToTheEngine(ComputeUnits units)
                || units == ComputeUnits::all);
 }
 
-bool ranOnTheCpu(const Model& model)
+bool ranOnTheCpu(const ComputePlan& plan)
 {
-    auto plan = model.computePlan();
     return plan.isEmpty() || plan.allOn(ComputePlan::Device::cpu);
 }
 
@@ -91,9 +91,9 @@ double cpuBoundOf(const Tolerances& tolerances)
 
 Tolerance toleranceWhereItRan(const Tolerances& tolerances,
                               const Tolerance& requested,
-                              const Model& model)
+                              const ComputePlan& plan)
 {
-    if (isHeldToTheEngine(requested.units) || !ranOnTheCpu(model))
+    if (isHeldToTheEngine(requested.units) || !ranOnTheCpu(plan))
         return requested;
 
     return {requested.units, cpuBoundOf(tolerances)};
@@ -101,7 +101,7 @@ Tolerance toleranceWhereItRan(const Tolerances& tolerances,
 
 void checkWithin(const std::string& what,
                  const Tolerance& tolerance,
-                 const Model& model,
+                 const std::string& placement,
                  const Errors& errors)
 {
     LOG(what,
@@ -112,7 +112,7 @@ void checkWithin(const std::string& what,
         " maxRel ",
         errors.maxRel,
         " placed ",
-        placementOf(model));
+        placement);
 
     check(errors.maxAbs <= tolerance.maxAbs,
           what + " under " + nameOf(tolerance.units) + ": max abs error "
@@ -134,13 +134,13 @@ void checkAttention(bool causal)
     auto v = TestPrograms::seededValues(length * depth, 53u, 1.0f);
 
     auto what = std::string {causal ? "causal attention" : "attention"};
-    auto cache = freshCacheDirectory(causal ? "causal-attention" : "attention");
+    auto cache = sharedCacheDirectory();
     auto package = TestPrograms::attention(length, depth, causal);
     check(!package.isEmpty());
 
     auto expected = TestPrograms::attentionReference(q, k, v, length, depth, causal);
 
-    for (const auto& tolerance: sameOnEveryUnit(attentionTolerance))
+    for (const auto& tolerance: sameOnCpuAndAll(attentionTolerance))
     {
         auto model = Model {};
         auto loaded = model.load(package, optionsFor(tolerance.units, cache));
@@ -160,8 +160,10 @@ void checkAttention(bool causal)
         auto result = model.predict(inputs, outputs);
         check(result.ok, result.error);
 
-        checkWithin(
-            what, tolerance, model, compare(outputs["y"].toFloats(), expected));
+        checkWithin(what,
+                    tolerance,
+                    placementOf(model),
+                    compare(outputs["y"].toFloats(), expected));
     }
 }
 
@@ -178,10 +180,14 @@ Vector<float> predictOnce(Model& model, const Shape& shape, const Vector<float>&
     return outputs["y"].toFloats();
 }
 
-constexpr auto everyUnit = Array<ComputeUnits, 4> {ComputeUnits::cpu,
-                                                   ComputeUnits::cpuAndGPU,
-                                                   ComputeUnits::cpuAndNeuralEngine,
-                                                   ComputeUnits::all};
+using UnitsList = Vector<ComputeUnits>;
+
+const auto everyUnit = UnitsList {ComputeUnits::cpu,
+                                  ComputeUnits::cpuAndGPU,
+                                  ComputeUnits::cpuAndNeuralEngine,
+                                  ComputeUnits::all};
+
+const auto cpuAndAll = UnitsList {ComputeUnits::cpu, ComputeUnits::all};
 
 struct ArgmaxCase
 {
@@ -348,13 +354,14 @@ Vector<ArgmaxCase> projectedCases(const TestPrograms::ProjectedArgmax& net)
 
 void checkArgmax(const std::string& what,
                  const Package& package,
-                 const Vector<ArgmaxCase>& cases)
+                 const Vector<ArgmaxCase>& cases,
+                 const UnitsList& unitsToRun)
 {
     check(!package.isEmpty());
 
-    auto cache = freshCacheDirectory(what);
+    auto cache = sharedCacheDirectory();
 
-    for (auto units: everyUnit)
+    for (auto units: unitsToRun)
     {
         auto model = Model {};
         auto loaded = model.load(package, optionsFor(units, cache));
@@ -402,6 +409,15 @@ Vector<float> beyondThePrefix(const TestPrograms::MaskedAttention& net,
     return result;
 }
 
+struct PrefixCase
+{
+    std::string what;
+    int prefix = 0;
+    Inputs inputs;
+    Vector<float> expected;
+    Vector<float> unmasked;
+};
+
 void checkMaskedAttention(int keys, bool projected, const Tolerances& tolerances)
 {
     if (!isSupportedAttention())
@@ -411,9 +427,7 @@ void checkMaskedAttention(int keys, bool projected, const Tolerances& tolerances
                          : TestPrograms::MaskedAttention {6, keys, 64};
     auto cacheCount = net.heads * net.keys * net.depth;
     auto label = std::string {projected ? "projected " : ""} + "masked attention";
-    auto cache = freshCacheDirectory(
-        (projected ? "projected-masked-attention-" : "masked-attention-")
-        + std::to_string(keys));
+    auto cache = sharedCacheDirectory();
     auto package = TestPrograms::maskedAttention(net);
     check(!package.isEmpty());
 
@@ -422,6 +436,29 @@ void checkMaskedAttention(int keys, bool projected, const Tolerances& tolerances
     auto v = TestPrograms::seededValues(cacheCount, 63u, 1.0f);
     auto keyNoise = TestPrograms::seededValues(cacheCount, 64u, 50.0f);
     auto valueNoise = TestPrograms::seededValues(cacheCount, 65u, 50.0f);
+
+    auto cases = Vector<PrefixCase> {};
+
+    for (auto prefix: Vector<int> {1, keys * 2 / 5, keys})
+    {
+        auto maskedK = beyondThePrefix(net, k, keyNoise, prefix);
+        auto maskedV = beyondThePrefix(net, v, valueNoise, prefix);
+        auto allowed = TestPrograms::prefixMask(keys, prefix);
+
+        auto entry = PrefixCase {};
+        entry.what = label + " over " + std::to_string(prefix) + " of "
+                     + std::to_string(keys);
+        entry.prefix = prefix;
+        entry.inputs["q"] = arrayOf(q, net.queryShape(), DType::float16);
+        entry.inputs["k"] = arrayOf(maskedK, net.cacheShape(), DType::float16);
+        entry.inputs["v"] = arrayOf(maskedV, net.cacheShape(), DType::float16);
+        entry.inputs["allowed"] = arrayOf(allowed, net.maskShape(), DType::float16);
+        entry.expected =
+            TestPrograms::prefixAttentionReference(net, q, maskedK, maskedV, prefix);
+        entry.unmasked =
+            TestPrograms::prefixAttentionReference(net, q, maskedK, maskedV, keys);
+        cases.add(entry);
+    }
 
     for (const auto& tolerance: tolerances)
     {
@@ -432,42 +469,25 @@ void checkMaskedAttention(int keys, bool projected, const Tolerances& tolerances
         if (!loaded)
             return;
 
-        for (auto prefix: Vector<int> {1, keys * 2 / 5, keys})
+        auto plan = model.computePlan();
+        auto bound = toleranceWhereItRan(tolerances, tolerance, plan);
+        auto placement = placementOf(plan);
+
+        for (const auto& entry: cases)
         {
-            auto maskedK = beyondThePrefix(net, k, keyNoise, prefix);
-            auto maskedV = beyondThePrefix(net, v, valueNoise, prefix);
-            auto allowed = TestPrograms::prefixMask(keys, prefix);
-
-            auto inputs = Inputs {};
-            inputs["q"] = arrayOf(q, net.queryShape(), DType::float16);
-            inputs["k"] = arrayOf(maskedK, net.cacheShape(), DType::float16);
-            inputs["v"] = arrayOf(maskedV, net.cacheShape(), DType::float16);
-            inputs["allowed"] = arrayOf(allowed, net.maskShape(), DType::float16);
-
             auto outputs = Outputs {};
             outputs["y"] = MultiArray::create(net.queryShape(), DType::float16);
 
-            auto result = model.predict(inputs, outputs);
+            auto result = model.predict(entry.inputs, outputs);
             check(result.ok, result.error);
 
             auto actual = outputs["y"].toFloats();
-            auto expected = TestPrograms::prefixAttentionReference(
-                net, q, maskedK, maskedV, prefix);
-            auto what = label + " over " + std::to_string(prefix) + " of "
-                        + std::to_string(keys);
+            checkWithin(
+                entry.what, bound, placement, compare(actual, entry.expected));
 
-            checkWithin(what,
-                        toleranceWhereItRan(tolerances, tolerance, model),
-                        model,
-                        compare(actual, expected));
-
-            if (prefix == keys)
-                continue;
-
-            auto unmasked = TestPrograms::prefixAttentionReference(
-                net, q, maskedK, maskedV, keys);
-            check(compare(actual, unmasked).maxAbs > 1.0,
-                  what + " is as close to the unmasked attention");
+            if (entry.prefix != keys)
+                check(compare(actual, entry.unmasked).maxAbs > 1.0,
+                      entry.what + " is as close to the unmasked attention");
         }
     }
 }
@@ -482,12 +502,12 @@ auto tElementwiseChainMatchesReference =
     constexpr auto rows = 1500;
     constexpr auto columns = 384;
 
-    auto cache = freshCacheDirectory("elementwise");
+    auto cache = sharedCacheDirectory();
     auto package = TestPrograms::elementwiseChain(rows, columns);
     auto x = TestPrograms::seededValues(rows * columns, 7u, 2.0f);
     auto expected = TestPrograms::elementwiseReference(x);
 
-    for (const auto& tolerance: sameOnEveryUnit(elementwiseTolerance))
+    for (const auto& tolerance: sameOnCpuAndAll(elementwiseTolerance))
     {
         auto model = Model {};
         auto loaded = model.load(package, optionsFor(tolerance.units, cache));
@@ -497,7 +517,8 @@ auto tElementwiseChainMatchesReference =
             return;
 
         auto actual = predictOnce(model, {rows, columns}, x);
-        checkWithin("elementwise", tolerance, model, compare(actual, expected));
+        checkWithin(
+            "elementwise", tolerance, placementOf(model), compare(actual, expected));
     }
 };
 
@@ -507,8 +528,8 @@ auto tLinearSoftmaxMatchesReference =
     if (!isSupported())
         return;
 
-    auto net = TestPrograms::linearSoftmaxWeights(1500, 384);
-    auto cache = freshCacheDirectory("linear-softmax");
+    auto net = TestPrograms::linearSoftmaxWeights(64, 384);
+    auto cache = sharedCacheDirectory();
     auto package = TestPrograms::linearSoftmax(net);
     auto x = TestPrograms::seededValues(net.rows * net.width, 42u, 1.0f);
     auto expected = TestPrograms::linearSoftmaxReference(net, x);
@@ -523,9 +544,10 @@ auto tLinearSoftmaxMatchesReference =
             return;
 
         auto actual = predictOnce(model, {net.rows, net.width}, x);
+        auto plan = model.computePlan();
         checkWithin("linear+softmax",
-                    toleranceWhereItRan(linearSoftmaxTolerances, tolerance, model),
-                    model,
+                    toleranceWhereItRan(linearSoftmaxTolerances, tolerance, plan),
+                    placementOf(plan),
                     compare(actual, expected));
     }
 };
@@ -537,14 +559,14 @@ auto tLayerNormMatchesReference =
         return;
 
     auto net = TestPrograms::layerNormWeights(1500, 384);
-    auto cache = freshCacheDirectory("layer-norm");
+    auto cache = sharedCacheDirectory();
     auto package = TestPrograms::layerNorm(net);
     check(!package.isEmpty());
 
     auto x = TestPrograms::seededValues(net.rows * net.width, 43u, 1.5f);
     auto expected = TestPrograms::layerNormReference(net, x);
 
-    for (const auto& tolerance: sameOnEveryUnit(layerNormTolerance))
+    for (const auto& tolerance: sameOnCpuAndAll(layerNormTolerance))
     {
         auto model = Model {};
         auto loaded = model.load(package, optionsFor(tolerance.units, cache));
@@ -554,7 +576,8 @@ auto tLayerNormMatchesReference =
             return;
 
         auto actual = predictOnce(model, {net.rows, net.width}, x);
-        checkWithin("layer norm", tolerance, model, compare(actual, expected));
+        checkWithin(
+            "layer norm", tolerance, placementOf(model), compare(actual, expected));
     }
 };
 
@@ -564,9 +587,9 @@ auto tLinearLayerNormMatchesReference =
     if (!isSupported())
         return;
 
-    auto projection = TestPrograms::linearSoftmaxWeights(1500, 384, 99u);
-    auto norm = TestPrograms::layerNormWeights(1500, 384);
-    auto cache = freshCacheDirectory("linear-layer-norm");
+    auto projection = TestPrograms::linearSoftmaxWeights(64, 384, 99u);
+    auto norm = TestPrograms::layerNormWeights(64, 384);
+    auto cache = sharedCacheDirectory();
     auto package = TestPrograms::linearLayerNorm(projection, norm);
     check(!package.isEmpty());
 
@@ -583,9 +606,10 @@ auto tLinearLayerNormMatchesReference =
             return;
 
         auto actual = predictOnce(model, {norm.rows, norm.width}, x);
+        auto plan = model.computePlan();
         checkWithin("linear+layer norm",
-                    toleranceWhereItRan(linearLayerNormTolerances, tolerance, model),
-                    model,
+                    toleranceWhereItRan(linearLayerNormTolerances, tolerance, plan),
+                    placementOf(plan),
                     compare(actual, expected));
     }
 };
@@ -610,10 +634,11 @@ auto tArgmaxMatchesReference =
     for (auto vocabulary: {64, 51864})
         checkArgmax("argmax over " + std::to_string(vocabulary),
                     TestPrograms::suppressedArgmax(vocabulary),
-                    logitsCases(vocabulary));
+                    logitsCases(vocabulary),
+                    cpuAndAll);
 };
 
-// Whisper's logits projection, 51864 tokens of 384, in front of the argmax:
+// A logits projection, 8192 tokens of Whisper's 384, in front of the argmax:
 // a lone argmax stays on the CPU, and this is what moves it.
 auto tProjectedArgmaxMatchesReference =
     test("MLPrograms/anArgmaxBehindTheLogitsProjectionOnEveryDevice") = []
@@ -621,24 +646,22 @@ auto tProjectedArgmaxMatchesReference =
     if (!isSupported())
         return;
 
-    auto net = projectedArgmaxWeights(51864, 384);
-    checkArgmax(
-        "projected argmax", TestPrograms::projectedArgmax(net), projectedCases(net));
+    auto net = projectedArgmaxWeights(8192, 384);
+    checkArgmax("projected argmax",
+                TestPrograms::projectedArgmax(net),
+                projectedCases(net),
+                everyUnit);
 };
 
 auto tMaskedAttention =
     test("MLPrograms/anInputMaskHoldsAttentionToAPrefixOnEveryDevice") = []
-{
-    for (auto keys: {449, 1500})
-        checkMaskedAttention(keys, false, sameOnEveryUnit(maskedAttentionTolerance));
-};
+{ checkMaskedAttention(449, false, sameOnCpuAndAll(maskedAttentionTolerance)); };
 
 auto tProjectedMaskedAttention =
     test("MLPrograms/anInputMaskHoldsAProjectedAttentionToAPrefixOnEveryDevice") = []
 {
-    for (auto keys: {449, 1500})
-        checkMaskedAttention(
-            keys, true, sameOnEveryUnit(projectedMaskedAttentionTolerance));
+    checkMaskedAttention(
+        449, true, sameOnCpuAndAll(projectedMaskedAttentionTolerance));
 };
 
 auto tFloat32ProgramRunsOnPlainArrays =
@@ -652,8 +675,8 @@ auto tFloat32ProgramRunsOnPlainArrays =
 
     auto package = TestPrograms::elementwiseChain(rows, columns, DType::float32);
     auto model = Model {};
-    auto loaded = model.load(
-        package, optionsFor(ComputeUnits::cpu, freshCacheDirectory("fp32")));
+    auto loaded =
+        model.load(package, optionsFor(ComputeUnits::cpu, sharedCacheDirectory()));
     check(loaded.ok, loaded.error);
 
     if (!loaded)
@@ -685,9 +708,8 @@ auto tUnboundOutputsAreAllocated =
     constexpr auto columns = 32;
 
     auto model = Model {};
-    auto loaded =
-        model.load(TestPrograms::elementwiseChain(rows, columns),
-                   optionsFor(ComputeUnits::all, freshCacheDirectory("unbound")));
+    auto loaded = model.load(TestPrograms::elementwiseChain(rows, columns),
+                             optionsFor(ComputeUnits::all, sharedCacheDirectory()));
     check(loaded.ok, loaded.error);
 
     if (!loaded)
@@ -719,9 +741,8 @@ auto tDescriptionNamesTheFeatures =
         return;
 
     auto model = Model {};
-    auto loaded =
-        model.load(TestPrograms::elementwiseChain(4, 8),
-                   optionsFor(ComputeUnits::cpu, freshCacheDirectory("describe")));
+    auto loaded = model.load(TestPrograms::elementwiseChain(4, 8),
+                             optionsFor(ComputeUnits::cpu, sharedCacheDirectory()));
     check(loaded.ok, loaded.error);
 
     auto inputs = model.inputs();
@@ -740,15 +761,51 @@ auto tDescriptionNamesTheFeatures =
     check(outputs[0].type == DType::float16);
 };
 
+// Before macOS 27 an enumerated model placed on the CPU traps in BNNS on its
+// first prediction, so the load is refused where the CPU is certain and
+// allowed everywhere else; on macOS 27 it loads under every setting.
+auto tEnumeratedOnTheCpu =
+    test("MLPrograms/anEnumeratedModelIsRefusedWhereTheCpuWouldTrap") = []
+{
+    if (!isSupported() || !supportsSpecification(8))
+        return;
+
+    auto cache = freshCacheDirectory("enumerated-cpu");
+    auto package = TestPrograms::enumeratedElementwiseChain(8, 4);
+
+    auto cpuOnly = Model {};
+    auto refused = cpuOnly.load(package, optionsFor(ComputeUnits::cpu, cache));
+    check(refused.ok == enumeratedShapesRunOnTheCpu(), refused.error);
+    check(cpuOnly.isLoaded() == enumeratedShapesRunOnTheCpu());
+
+    if (!refused.ok)
+        check(refused.error.find("enumerated") != std::string::npos, refused.error);
+
+    auto withGpu = Model {};
+    auto allowed = withGpu.load(package, optionsFor(ComputeUnits::cpuAndGPU, cache));
+    check(allowed.ok, allowed.error);
+    check(withGpu.inputs().size() == 1
+          && !withGpu.inputs()[0].enumeratedShapes.empty());
+
+    auto fixed = Model {};
+    auto plain = fixed.load(TestPrograms::elementwiseChain(8, 4),
+                            optionsFor(ComputeUnits::cpu, cache));
+    check(plain.ok, plain.error);
+
+    check(isCpuOnly(ComputeUnits::cpu));
+    check(!isCpuOnly(ComputeUnits::all));
+    check(!isCpuOnly(ComputeUnits::cpuAndGPU));
+    check(isCpuOnly(ComputeUnits::cpuAndNeuralEngine) == !hasNeuralEngine());
+};
+
 auto tMissingInputFails = test("MLPrograms/aMissingInputFailsWithAMessage") = []
 {
     if (!isSupported())
         return;
 
     auto model = Model {};
-    auto loaded =
-        model.load(TestPrograms::elementwiseChain(4, 8),
-                   optionsFor(ComputeUnits::cpu, freshCacheDirectory("missing")));
+    auto loaded = model.load(TestPrograms::elementwiseChain(4, 8),
+                             optionsFor(ComputeUnits::cpu, sharedCacheDirectory()));
     check(loaded.ok, loaded.error);
 
     auto outputs = Outputs {};

@@ -8,6 +8,8 @@
 
 #include <winrt/base.h>
 
+#include <cmath>
+
 // Windows/D3D12 backend. Everything the D3D11 backend kept as five separate
 // state objects bakes into a single pipeline-state object against the shared
 // render root signature; only the topology and vertex stride stay outside the
@@ -81,6 +83,73 @@ DXGI_FORMAT toDXGIFormat(VertexFormat format)
             return DXGI_FORMAT_R16G16_SNORM;
         case VertexFormat::Short4Norm:
             return DXGI_FORMAT_R16G16B16A16_SNORM;
+
+        // The integer formats are UINT and SINT, which an HLSL uint or int
+        // input reads unconverted; Metal's plain MTLVertexFormatUChar4 and
+        // friends are the same thing. R10G10B10A2_UNORM has x in the low bits,
+        // as Metal's UInt1010102Normalized does.
+        case VertexFormat::UByte:
+            return DXGI_FORMAT_R8_UINT;
+        case VertexFormat::UByte2:
+            return DXGI_FORMAT_R8G8_UINT;
+        case VertexFormat::UByte4:
+            return DXGI_FORMAT_R8G8B8A8_UINT;
+        case VertexFormat::UByteNorm:
+            return DXGI_FORMAT_R8_UNORM;
+        case VertexFormat::UByte2Norm:
+            return DXGI_FORMAT_R8G8_UNORM;
+        case VertexFormat::Byte:
+            return DXGI_FORMAT_R8_SINT;
+        case VertexFormat::Byte2:
+            return DXGI_FORMAT_R8G8_SINT;
+        case VertexFormat::Byte4:
+            return DXGI_FORMAT_R8G8B8A8_SINT;
+        case VertexFormat::ByteNorm:
+            return DXGI_FORMAT_R8_SNORM;
+        case VertexFormat::Byte2Norm:
+            return DXGI_FORMAT_R8G8_SNORM;
+        case VertexFormat::Byte4Norm:
+            return DXGI_FORMAT_R8G8B8A8_SNORM;
+        case VertexFormat::UShort:
+            return DXGI_FORMAT_R16_UINT;
+        case VertexFormat::UShort2:
+            return DXGI_FORMAT_R16G16_UINT;
+        case VertexFormat::UShort4:
+            return DXGI_FORMAT_R16G16B16A16_UINT;
+        case VertexFormat::UShortNorm:
+            return DXGI_FORMAT_R16_UNORM;
+        case VertexFormat::UShort2Norm:
+            return DXGI_FORMAT_R16G16_UNORM;
+        case VertexFormat::UShort4Norm:
+            return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case VertexFormat::Short:
+            return DXGI_FORMAT_R16_SINT;
+        case VertexFormat::Short2:
+            return DXGI_FORMAT_R16G16_SINT;
+        case VertexFormat::Short4:
+            return DXGI_FORMAT_R16G16B16A16_SINT;
+        case VertexFormat::ShortNorm:
+            return DXGI_FORMAT_R16_SNORM;
+        case VertexFormat::Half:
+            return DXGI_FORMAT_R16_FLOAT;
+        case VertexFormat::UInt1010102Norm:
+            return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case VertexFormat::UInt:
+            return DXGI_FORMAT_R32_UINT;
+        case VertexFormat::UInt2:
+            return DXGI_FORMAT_R32G32_UINT;
+        case VertexFormat::UInt3:
+            return DXGI_FORMAT_R32G32B32_UINT;
+        case VertexFormat::UInt4:
+            return DXGI_FORMAT_R32G32B32A32_UINT;
+        case VertexFormat::Int:
+            return DXGI_FORMAT_R32_SINT;
+        case VertexFormat::Int2:
+            return DXGI_FORMAT_R32G32_SINT;
+        case VertexFormat::Int3:
+            return DXGI_FORMAT_R32G32B32_SINT;
+        case VertexFormat::Int4:
+            return DXGI_FORMAT_R32G32B32A32_SINT;
     }
 
     return DXGI_FORMAT_R32G32B32_FLOAT;
@@ -91,21 +160,7 @@ DXGI_FORMAT toDXGIFormat(VertexFormat format)
 // TextureDescriptor::renderTarget.
 DXGI_FORMAT toDXGIFormat(PixelFormat format)
 {
-    switch (format)
-    {
-        case PixelFormat::RGBA8Unorm:
-            return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case PixelFormat::RGBA16Float:
-            return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case PixelFormat::RGBA32Float:
-            return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case PixelFormat::R32Float:
-            return DXGI_FORMAT_R32_FLOAT;
-        case PixelFormat::BGRA8Unorm:
-            break;
-    }
-
-    return DXGI_FORMAT_B8G8R8A8_UNORM;
+    return d3d12TextureFormat(textureFormatFor(format));
 }
 
 // Vertex attributes are matched to the HLSL input by a TEXCOORD semantic
@@ -228,6 +283,13 @@ D3D12_RASTERIZER_DESC makeRasterizerDesc(const RenderPipelineDescriptor& from)
     desc.FrontCounterClockwise = from.frontFace == Winding::CounterClockwise;
     desc.DepthClipEnable = TRUE;
     desc.MultisampleEnable = from.sampleCount > 1 ? TRUE : FALSE;
+
+    // An integer here and a float on Metal and Vulkan, in the same unit on all
+    // three for a float depth plane, so rounding is the whole conversion.
+    const auto bias = appliedDepthBias(from);
+    desc.DepthBias = static_cast<INT>(std::lround(bias.constant));
+    desc.SlopeScaledDepthBias = bias.slopeScale;
+    desc.DepthBiasClamp = bias.clamp;
     return desc;
 }
 
@@ -329,19 +391,17 @@ UINT8 toD3DWriteMask(const ColorWriteMask& mask)
 }
 
 // One path for the named modes and for a written-out equation, because
-// blendStateFor turns the first into the second. A preset's meaning is stated
+// resolvedBlend turns the first into the second. A preset's meaning is stated
 // once, in the header, rather than once per backend.
-D3D12_BLEND_DESC makeBlendDesc(const RenderPipelineDescriptor& from)
+D3D12_RENDER_TARGET_BLEND_DESC makeTargetBlendDesc(const ColorTargetState& from)
 {
-    D3D12_BLEND_DESC desc = {};
-    auto& target = desc.RenderTarget[0];
+    D3D12_RENDER_TARGET_BLEND_DESC target = {};
+    target.RenderTargetWriteMask = toD3DWriteMask(from.writeMask);
 
-    target.RenderTargetWriteMask = toD3DWriteMask(from.colorWriteMask);
-
-    const auto blend = from.blend ? *from.blend : blendStateFor(from.blendMode);
+    const auto blend = resolvedBlend(from);
 
     if (!blend.enabled)
-        return desc;
+        return target;
 
     target.BlendEnable = TRUE;
     target.SrcBlend = toD3DBlendFactor(blend.sourceColor);
@@ -350,6 +410,22 @@ D3D12_BLEND_DESC makeBlendDesc(const RenderPipelineDescriptor& from)
     target.SrcBlendAlpha = toD3DAlphaBlendFactor(blend.sourceAlpha);
     target.DestBlendAlpha = toD3DAlphaBlendFactor(blend.destinationAlpha);
     target.BlendOpAlpha = toD3DBlendOperation(blend.alphaOperation);
+
+    return target;
+}
+
+// Independent whenever there is more than one target: D3D12 otherwise applies
+// RenderTarget[0] to every attachment, and eacp's attachments each blend as
+// their own ColorTargetState says.
+D3D12_BLEND_DESC makeBlendDesc(const RenderPipelineDescriptor& from,
+                               bool hasFragment)
+{
+    D3D12_BLEND_DESC desc = {};
+    desc.IndependentBlendEnable = from.colorTargetCount() > 1 ? TRUE : FALSE;
+
+    for (auto index = 0; index < from.colorTargetCount(); ++index)
+        desc.RenderTarget[index] =
+            makeTargetBlendDesc(writtenColorTarget(from, index, hasFragment));
 
     return desc;
 }
@@ -432,6 +508,7 @@ struct RenderPipeline::Native
         , topology(descriptor.topology)
         , cullMode(descriptor.cullMode)
         , frontFace(descriptor.frontFace)
+        , depthBias(appliedDepthBias(descriptor))
     {
         pipeline.topology = toD3DTopology(descriptor.topology);
         pipeline.strides = makeStrideTable(descriptor.vertexLayout);
@@ -445,9 +522,20 @@ struct RenderPipeline::Native
         auto* program =
             static_cast<D3D12ShaderProgram*>(descriptor.library->nativeLibrary());
 
+        const auto hasFragment = descriptor.library->hasFragment();
+
         if (program == nullptr || program->vertexBytecode == nullptr
-            || program->pixelBytecode == nullptr)
+            || (hasFragment && program->pixelBytecode == nullptr))
             return;
+
+        if (descriptor.colorTargetCount() > maxColorAttachments)
+        {
+            LOG("D3D12: a pipeline writing ",
+                descriptor.colorTargetCount(),
+                " colour targets is refused; the most is ",
+                maxColorAttachments);
+            return;
+        }
 
         auto inputLayout = makeInputLayout(descriptor.vertexLayout);
 
@@ -455,17 +543,24 @@ struct RenderPipeline::Native
         desc.pRootSignature = context.getRenderRootSignature();
         desc.VS.pShaderBytecode = program->vertexBytecode->GetBufferPointer();
         desc.VS.BytecodeLength = program->vertexBytecode->GetBufferSize();
-        desc.PS.pShaderBytecode = program->pixelBytecode->GetBufferPointer();
-        desc.PS.BytecodeLength = program->pixelBytecode->GetBufferSize();
-        desc.BlendState = makeBlendDesc(descriptor);
+        if (hasFragment)
+        {
+            desc.PS.pShaderBytecode = program->pixelBytecode->GetBufferPointer();
+            desc.PS.BytecodeLength = program->pixelBytecode->GetBufferSize();
+        }
+
+        desc.BlendState = makeBlendDesc(descriptor, hasFragment);
         desc.SampleMask = UINT_MAX;
         desc.RasterizerState = makeRasterizerDesc(descriptor);
         desc.DepthStencilState = makeDepthStencilDesc(descriptor);
         desc.InputLayout.pInputElementDescs = inputLayout.data();
         desc.InputLayout.NumElements = static_cast<UINT>(inputLayout.size());
         desc.PrimitiveTopologyType = toTopologyType(descriptor.topology);
-        desc.NumRenderTargets = 1;
-        desc.RTVFormats[0] = toDXGIFormat(descriptor.colorFormat);
+        desc.NumRenderTargets = static_cast<UINT>(descriptor.colorTargetCount());
+
+        for (auto index = 0; index < descriptor.colorTargetCount(); ++index)
+            desc.RTVFormats[index] =
+                toDXGIFormat(descriptor.colorTarget(index).format);
         desc.DSVFormat = descriptor.depth || descriptor.stencil
                              ? depthAttachmentFormat(descriptor.stencil)
                              : DXGI_FORMAT_UNKNOWN;
@@ -486,6 +581,7 @@ struct RenderPipeline::Native
     PrimitiveTopology topology = PrimitiveTopology::Triangles;
     CullMode cullMode = CullMode::None;
     Winding frontFace = Winding::CounterClockwise;
+    DepthBias depthBias;
     D3D12Pipeline pipeline;
 };
 
@@ -515,6 +611,11 @@ CullMode RenderPipeline::cullMode() const
 Winding RenderPipeline::frontFace() const
 {
     return impl->frontFace;
+}
+
+DepthBias RenderPipeline::depthBias() const
+{
+    return impl->depthBias;
 }
 
 void* RenderPipeline::nativeState() const

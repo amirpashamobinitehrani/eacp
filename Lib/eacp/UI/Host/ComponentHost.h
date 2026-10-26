@@ -1,9 +1,11 @@
 #pragma once
 
 #include "../Component/Component.h"
+#include "../DragAndDrop/FileDropTarget.h"
 #include "../Render/DrawPlayer.h"
 #include "../Render/ImageCache.h"
 #include "../Render/MaskCache.h"
+#include "../Widgets/ThemeKeys.h"
 
 #include <memory>
 #include <optional>
@@ -64,6 +66,16 @@ public:
     void setFontPointSize(float points);
     void setFontFamily(const std::string& family);
 
+    // What every component in the tree reads its colours, corners and other
+    // keyed values from (Component::getHostTheme): a product's look for one
+    // tree, without touching another tree in the same process -- a plugin's
+    // editor and its host's window, say. Empty until set, which reads as
+    // defaultTheme(). A theme that holds ThemeKeys::font or
+    // ThemeKeys::background also gives the host its face or its backdrop, as
+    // setFont and setBackgroundColour would. Repaints the whole tree.
+    void setTheme(const Theme& theme);
+    const Theme& getTheme() const;
+
     // Measurement without a paint in progress -- see Component::measureText,
     // which is where a component should ask. Builds the renderer if the host has
     // not drawn yet: measuring needs the fonts and not the GPU, so a component
@@ -109,6 +121,14 @@ public:
     // already has, which is what makes an animated opacity cheap.
     int getLastRenderedLayerCount() const;
 
+    // GPUComponents in the tree as the last frame found them: rendered (its
+    // render() ran), culled (showing, but clipped or scrolled out entirely, or
+    // of zero size) and hidden (it or an ancestor not visible). The three are
+    // disjoint; one on screen with nothing new to render is in none.
+    int getLastRenderedGPUComponentCount() const;
+    int getLastCulledGPUComponentCount() const;
+    int getLastHiddenGPUComponentCount() const;
+
     // Vector shapes in the tree that have no mask, the coverage atlas having had
     // no room for them: each one draws as nothing. Zero unless an interface has
     // reached the atlas ceiling, which is a real limit rather than an error --
@@ -144,6 +164,10 @@ public:
     float getAtlasFillFraction() const;
     int getAtlasSize() const;
 
+    // How many walks without a grow the atlas waits before giving room back.
+    // See CoverageAtlas::setQuietWalksToShrink.
+    void setAtlasQuietWalksToShrink(int walks);
+
     // Paints every component in the tree that has asked for it, into the list
     // the next frame replays, and returns how many were painted.
     //
@@ -168,6 +192,12 @@ public:
     // deterministic under test.
     void setAnimationClockEnabled(bool shouldRun);
 
+    // Caps how often that display link ticks, and so every animation in the
+    // tree with it, continuous GPUComponents included. Zero (the default)
+    // ticks at the display's refresh. See DisplayLink::setMaxFps.
+    void setAnimationMaxFps(int fps);
+    int getAnimationMaxFps() const;
+
     // The component keys are offered to first. Null means none has been focused,
     // and the tree's keys go to the root -- which is what makes a shortcut work
     // before anything has been clicked.
@@ -186,12 +216,38 @@ public:
     void keyDown(const eacp::Graphics::KeyEvent& event) override;
     void keyUp(const eacp::Graphics::KeyEvent& event) override;
 
+    // Shows the cursor of the component under the pointer again, for a cursor
+    // that changed without the pointer moving. Component::setMouseCursor calls
+    // it for the hovered component, so this is only needed by hand where
+    // something else decides the shape.
+    void updateMouseCursor();
+
     void mouseDown(const eacp::Graphics::MouseEvent& event) override;
     void mouseUp(const eacp::Graphics::MouseEvent& event) override;
     void mouseDragged(const eacp::Graphics::MouseEvent& event) override;
     void mouseMoved(const eacp::Graphics::MouseEvent& event) override;
     void mouseExited(const eacp::Graphics::MouseEvent& event) override;
     void mouseWheel(const eacp::Graphics::MouseEvent& event) override;
+    void mouseMagnify(const eacp::Graphics::MouseEvent& event) override;
+
+    // Files dragged in from the OS, handed to the FileDropTarget components in
+    // the tree. The host accepts file drops from construction; turn it off with
+    // setAcceptsFileDrops(false) for a tree that should let them pass.
+    bool fileDragEnter(const Vector<std::string>& files, Point position) override;
+    bool fileDragMove(const Vector<std::string>& files, Point position) override;
+    void fileDragExit() override;
+    void filesDropped(const Vector<std::string>& files, Point position) override;
+
+    // The component a file dragged over `positionInRoot` would go to, or null.
+    Component* findFileDropTarget(const Vector<std::string>& files,
+                                  Point positionInRoot) const;
+
+protected:
+    // Everything the host made on the lost device is made again - its
+    // renderers, the coverage atlas, the glyph and image textures and every
+    // layer's texture - the tree is painted from scratch, and every
+    // GPUComponent in it is told through its onDeviceRestored.
+    void deviceRestored() override;
 
 private:
     friend class Component;
@@ -208,6 +264,11 @@ private:
     void stopAnimating(Component& component);
     bool isAnimating(const Component& component) const;
     void forgetAnimationsIn(Component& subtree);
+
+    // A subtree joined the tree: every continuous GPUComponent in it that is
+    // not already ticking starts again.
+    void subtreeAttached(Component& subtree);
+
     void startAnimationClock();
     void retireAnimationClockWhenIdle();
 
@@ -244,11 +305,17 @@ private:
     void record(Component& component);
 
     // Draws the recorded lists, in tree order, offsetting each by where its
-    // component sits and clipping it to what its ancestors left of it.
+    // component sits and clipping it to what its ancestors left of it. Steps
+    // over a subtree a Layer captures, which is drawn into that layer instead
+    // -- by playSubtree, the same walk without that one check at its root.
     void playComponent(Component& component,
                        DrawPlayer& player,
                        Point origin,
                        const Rect& clip);
+    void playSubtree(Component& component,
+                     DrawPlayer& player,
+                     Point origin,
+                     const Rect& clip);
 
     // Everything in the subtree has to be painted again: the scale changed, the
     // atlas moved under the uvs, or the tree's default face did.
@@ -272,9 +339,38 @@ private:
     // Rendering every Layer in the tree whose content changed, each into a pass
     // of its own, before the frame's own pass opens -- which is the only place
     // it can happen, a pass not being able to begin inside another one.
+    //
+    // The walk tracks where each component sits and what its ancestors leave
+    // of it exactly as playSubtree does, so a GPUComponent the frame would not
+    // draw is not rendered either. A captured subtree starts again unclipped,
+    // being drawn into its layer rather than where it sits.
     void renderLayers(GPU::Frame& frame);
-    void renderLayers(Component& component, GPU::Frame& frame);
+    void renderLayers(Component& component,
+                      GPU::Frame& frame,
+                      Point origin,
+                      const Rect& clip);
+    void recordLayer(Layer& layer, DrawList& list);
     void renderLayer(Layer& layer, GPU::Frame& frame);
+    void renderOwnPass(Layer& layer, GPU::Frame& frame);
+
+    // A GPUComponent's layer: kept at the component's bounds, culled when
+    // `visibleLocal` is empty, and otherwise rendered by the component's own
+    // render() through the frame, redirected. Returns whether it rendered.
+    bool renderFrameLayer(Layer& layer,
+                          GPU::Frame& frame,
+                          const Rect& visibleLocal,
+                          bool earlierLayerRendered);
+    void playContent(Layer& layer, DrawPlayer& player);
+
+    void markGPUComponentsHidden(Component& component);
+    void dropLayerTextures(Component& component);
+    void notifyDeviceRestored(Component& component);
+
+    // Records the subtree a layer captures, if anything in it is stale, so the
+    // layer is drawn from this frame's recordings rather than the last one's.
+    // Returns whether anything was painted, which is what makes the layer
+    // dirty.
+    bool recordContent(Layer& layer);
 
     // Rasterizing every PathShape in the tree whose geometry changed, before
     // the render pass opens. See the definition for why it can only happen here.
@@ -289,6 +385,10 @@ private:
     // space, and the fields the native event already carries.
     MouseEvent makeEvent(const Component& target,
                          const eacp::Graphics::MouseEvent& event) const;
+
+    Point toRootSpace(Point position) const;
+    void setFileDragTarget(Component* target, Point positionInRoot);
+    bool updateFileDrag(const Vector<std::string>& files, Point position);
 
     void updateHover(Component* target, const eacp::Graphics::MouseEvent& event);
     void setHoveredComponent(Component* component,
@@ -313,13 +413,16 @@ private:
 
     Component* root = nullptr;
 
-    Color background {0.11f, 0.12f, 0.15f, 1.f};
+    Color background = defaultTheme().get(ThemeKeys::background);
 
-    Font font {defaultUIFontFamily(), 13.f};
+    Font font = defaultTheme().get(ThemeKeys::font);
+
+    Theme theme;
 
     // Built on the first resize, once there is a size to build them against.
     // The atlas comes first and outlives the batch that reads it.
     std::optional<CoverageAtlas> paths;
+    int atlasQuietWalks = CoverageAtlas::defaultQuietWalksToShrink;
 
     // What is already in the atlas, by the geometry that put it there, so that
     // a shape drawn in forty-eight places is rasterized once. Dropped with the
@@ -337,7 +440,9 @@ private:
     // across frames rather than made per frame, because what it holds is the
     // buffers -- a canvas whose paths all move re-fills them and allocates
     // nothing.
-    GPUWidgets::CoverageBatch pathBatch;
+    //
+    // Optional only so a restored device can have it made again.
+    std::optional<GPUWidgets::CoverageBatch> pathBatch {std::in_place};
 
     std::optional<ShapeBatch> shapes;
 
@@ -388,8 +493,17 @@ private:
     // wherever the pointer has since travelled -- a fader keeps tracking once
     // the pointer leaves it, which is the behaviour a drag has to have.
     Component* mouseDownTarget = nullptr;
+
+    // The press's click count, kept for its release: a platform is free to
+    // report 1 on the up of a double-click, and mouseDoubleClick goes by the
+    // down.
+    int pressClickCount = 1;
+
     Component* hoveredComponent = nullptr;
     Component* focusedComponent = nullptr;
+
+    Component* fileDragTarget = nullptr;
+    Vector<std::string> fileDragFiles;
 
     bool tabMovesFocus = true;
     bool respectsSafeArea = true;
@@ -412,6 +526,7 @@ private:
     bool advancingAnimations = false;
 
     OwningPointer<Threads::DisplayLink> animationClock;
+    int animationMaxFps = 0;
     bool animationClockEnabled = true;
     bool animationClockRetiring = false;
 
@@ -430,6 +545,16 @@ private:
     // Shapes that drew through a mask somebody else had already rasterized.
     int lastSharedMasks = 0;
     int lastRenderedLayers = 0;
+    int lastRenderedGPUComponents = 0;
+    int lastCulledGPUComponents = 0;
+    int lastHiddenGPUComponents = 0;
+    int renderedGPUComponentsThisWalk = 0;
+    int culledGPUComponentsThisWalk = 0;
+    int hiddenGPUComponentsThisWalk = 0;
+
+    // The captured subtree recordContent is recording, whose layer is about to
+    // be rendered and so needs no telling that its content changed.
+    Component* recordingContent = nullptr;
     int lastImageDraws = 0;
 };
 } // namespace eacp::UI

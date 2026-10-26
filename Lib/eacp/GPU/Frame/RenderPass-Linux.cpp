@@ -1,7 +1,10 @@
 #include "RenderPass.h"
 
+#include "IndirectDrawPlan.h"
+
 #include "../Buffer/Buffer.h"
 #include "../Pipeline/RenderPipeline.h"
+#include "../Texture/Sampler.h"
 #include "../Texture/Texture.h"
 #include "../Vulkan/VulkanTypes.h"
 
@@ -44,10 +47,10 @@ struct RenderPass::Native
         if (set == VK_NULL_HANDLE)
             return false;
 
-        VkWriteDescriptorSet writes[maxBufferSlots + maxTextureSlots + 1] = {};
+        VkWriteDescriptorSet writes[maxBufferSlots + maxStageTextureSlots + 1] = {};
         auto writeCount = std::uint32_t {0};
 
-        for (auto slot = 0; slot < maxTextureSlots; ++slot)
+        for (auto slot = 0; slot < maxStageTextureSlots; ++slot)
         {
             if ((boundTextures & (1u << slot)) == 0)
                 continue;
@@ -115,6 +118,56 @@ struct RenderPass::Native
         return true;
     }
 
+    // A combined image sampler at the texture's binding: the sampler travels in
+    // the descriptor write, whichever overload picked it.
+    void bindTexture(int slot,
+                     VkSampler sampler,
+                     VkImageView view,
+                     VkImageLayout layout)
+    {
+        textures[slot] = {sampler, view, layout};
+        boundTextures |= 1u << slot;
+        descriptorsDirty = true;
+    }
+
+    void bindColorTexture(const Texture& texture, int slot, VkSampler sampler)
+    {
+        if (!encoder || slot < 0 || slot >= maxStageTextureSlots
+            || sampler == VK_NULL_HANDLE)
+            return;
+
+        auto* data = static_cast<VulkanTextureData*>(texture.nativeTexture());
+
+        if (data == nullptr || !data->isValid())
+            return;
+
+        bindTexture(slot, sampler, data->sampledView, data->restingUse().layout);
+    }
+
+    // The whole plane at slice -1, one slice's 2D view otherwise.
+    void bindDepthTexture(const Texture& renderTarget,
+                          int slot,
+                          VkSampler sampler,
+                          int slice = -1)
+    {
+        if (!encoder || slot < 0 || slot >= maxStageTextureSlots
+            || sampler == VK_NULL_HANDLE)
+            return;
+
+        auto* data = static_cast<VulkanTextureData*>(renderTarget.nativeTexture());
+
+        if (data == nullptr || !data->hasSampleableDepth())
+            return;
+
+        const auto view =
+            slice < 0 ? data->depthReadView : vulkanDepthSliceView(*data, slice);
+
+        if (view == VK_NULL_HANDLE)
+            return;
+
+        bindTexture(slot, sampler, view, imageDepthSampled.layout);
+    }
+
     bool bindIndexRange(const BufferRange& indices, IndexFormat format)
     {
         if (indices.buffer == nullptr)
@@ -134,6 +187,43 @@ struct RenderPass::Native
                              format == IndexFormat::UInt16 ? VK_INDEX_TYPE_UINT16
                                                            : VK_INDEX_TYPE_UINT32);
         return true;
+    }
+
+    VulkanBufferData* noteIndirectRead(const Buffer& buffer)
+    {
+        auto* data = static_cast<VulkanBufferData*>(buffer.nativeBuffer());
+
+        if (data == nullptr || data->buffer == VK_NULL_HANDLE)
+            return nullptr;
+
+        noteBufferUse(*encoder->commands, *data, bufferIndirectRead);
+        return data;
+    }
+
+    // One call for the whole run where the device has multiDrawIndirect, in
+    // runs no longer than its maxDrawIndirectCount; one call per record where it
+    // does not.
+    template <typename Record>
+    void recordIndirectRuns(const IndirectDrawPlan& plan, Record&& record)
+    {
+        auto& shared = getVulkanShared();
+        const auto runLimit =
+            shared.supportsMultiDrawIndirect()
+                ? std::max(1,
+                           static_cast<int>(std::min(
+                               shared.getProperties().limits.maxDrawIndirectCount,
+                               static_cast<std::uint32_t>(plan.drawCount))))
+                : 1;
+
+        for (auto first = 0; first < plan.drawCount; first += runLimit)
+        {
+            const auto count = std::min(runLimit, plan.drawCount - first);
+            const auto offset = plan.offset + first * plan.stride;
+
+            record(static_cast<VkDeviceSize>(offset),
+                   static_cast<std::uint32_t>(count),
+                   static_cast<std::uint32_t>(plan.stride));
+        }
     }
 
     void bindStorageBuffer(const BufferRange& range, int slot)
@@ -174,7 +264,7 @@ struct RenderPass::Native
     VkDescriptorBufferInfo buffers[maxBufferSlots] = {};
     std::uint32_t boundBuffers = 0;
 
-    VkDescriptorImageInfo textures[maxTextureSlots] = {};
+    VkDescriptorImageInfo textures[maxStageTextureSlots] = {};
     std::uint32_t boundTextures = 0;
 
     ConstantRange uniforms;
@@ -182,8 +272,12 @@ struct RenderPass::Native
     bool descriptorsDirty = true;
 };
 
-RenderPass::RenderPass(void* encoder, int targetWidth, int targetHeight)
-    : impl(encoder, targetWidth, targetHeight)
+RenderPass::RenderPass(void* encoder,
+                       int targetWidth,
+                       int targetHeight,
+                       OcclusionQueries* queries)
+    : occlusionQueries(queries)
+    , impl(encoder, targetWidth, targetHeight)
 {
 }
 
@@ -337,44 +431,76 @@ void RenderPass::setFragmentTexture(const Texture& texture,
                                     int slot,
                                     TextureSampling sampling)
 {
-    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
-        return;
+    impl->bindColorTexture(texture, slot, getVulkanShared().getSampler(sampling));
+}
 
-    auto* data = static_cast<VulkanTextureData*>(texture.nativeTexture());
-
-    if (data == nullptr || !data->isValid())
-        return;
-
-    const auto sampler = getVulkanShared().getSampler(sampling);
-
-    if (sampler == VK_NULL_HANDLE)
-        return;
-
-    impl->textures[slot] = {sampler, data->sampledView, data->restingUse().layout};
-    impl->boundTextures |= 1u << slot;
-    impl->descriptorsDirty = true;
+void RenderPass::setFragmentTexture(const Texture& texture,
+                                    int slot,
+                                    const Sampler& sampler)
+{
+    impl->bindColorTexture(texture, slot, toVkSampler(sampler));
 }
 
 void RenderPass::setFragmentDepthTexture(const Texture& renderTarget,
                                          int slot,
                                          TextureSampling sampling)
 {
-    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
-        return;
+    impl->bindDepthTexture(
+        renderTarget, slot, getVulkanShared().getSampler(sampling));
+}
 
-    auto* data = static_cast<VulkanTextureData*>(renderTarget.nativeTexture());
+void RenderPass::setFragmentDepthTexture(const Texture& renderTarget,
+                                         int slot,
+                                         const Sampler& sampler)
+{
+    impl->bindDepthTexture(renderTarget, slot, toVkSampler(sampler));
+}
 
-    if (data == nullptr || !data->hasSampleableDepth())
-        return;
+void RenderPass::setFragmentDepthTextureSlice(const Texture& renderTarget,
+                                              int slice,
+                                              int slot,
+                                              TextureSampling sampling)
+{
+    impl->bindDepthTexture(
+        renderTarget, slot, getVulkanShared().getSampler(sampling), slice);
+}
 
-    const auto sampler = getVulkanShared().getSampler(sampling);
+void RenderPass::setFragmentDepthTextureSlice(const Texture& renderTarget,
+                                              int slice,
+                                              int slot,
+                                              const Sampler& sampler)
+{
+    impl->bindDepthTexture(renderTarget, slot, toVkSampler(sampler), slice);
+}
 
-    if (sampler == VK_NULL_HANDLE)
-        return;
+// The layout declares every combined image sampler for both stages, so the
+// vertex binds land on the same binding as the fragment ones.
+void RenderPass::setVertexTexture(const Texture& texture,
+                                  int slot,
+                                  TextureSampling sampling)
+{
+    setFragmentTexture(texture, slot, sampling);
+}
 
-    impl->textures[slot] = {sampler, data->depthReadView, imageDepthSampled.layout};
-    impl->boundTextures |= 1u << slot;
-    impl->descriptorsDirty = true;
+void RenderPass::setVertexTexture(const Texture& texture,
+                                  int slot,
+                                  const Sampler& sampler)
+{
+    setFragmentTexture(texture, slot, sampler);
+}
+
+void RenderPass::setVertexDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       TextureSampling sampling)
+{
+    setFragmentDepthTexture(renderTarget, slot, sampling);
+}
+
+void RenderPass::setVertexDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       const Sampler& sampler)
+{
+    setFragmentDepthTexture(renderTarget, slot, sampler);
 }
 
 void RenderPass::setVertexStorageBuffer(const Buffer& buffer, int slot)
@@ -483,6 +609,208 @@ void RenderPass::drawIndexedInstanced(const BufferRange& indices,
                      static_cast<std::uint32_t>(firstInstance));
 }
 
+void RenderPass::drawIndirect(const Buffer& arguments,
+                              std::int64_t offset,
+                              int drawCount,
+                              std::int64_t stride)
+{
+    const auto plan = planIndirectDraws(
+        arguments, offset, drawCount, stride, sizeof(DrawArguments));
+
+    if (!plan || !impl->canRecord())
+        return;
+
+    auto* data = impl->noteIndirectRead(arguments);
+
+    if (data == nullptr || !impl->bindDescriptors())
+        return;
+
+    impl->recordIndirectRuns(
+        *plan,
+        [&](VkDeviceSize first, std::uint32_t count, std::uint32_t step)
+        {
+            vkCmdDrawIndirect(
+                impl->commandBuffer(), data->buffer, first, count, step);
+        });
+}
+
+void RenderPass::drawIndirectCount(const Buffer& arguments,
+                                   std::int64_t offset,
+                                   const Buffer& count,
+                                   std::int64_t countOffset,
+                                   int maxDrawCount,
+                                   std::int64_t stride)
+{
+    if (!getVulkanShared().supportsIndirectCount())
+    {
+        traceIndirectCountUnsupported();
+        return;
+    }
+
+    const auto plan = planIndirectDraws(
+        arguments, offset, maxDrawCount, stride, sizeof(DrawArguments));
+
+    if (!plan || !isValidDrawCountBuffer(count, countOffset) || !impl->canRecord())
+        return;
+
+    auto* data = impl->noteIndirectRead(arguments);
+    auto* countData = impl->noteIndirectRead(count);
+
+    if (data == nullptr || countData == nullptr || !impl->bindDescriptors())
+        return;
+
+    vkCmdDrawIndirectCount(impl->commandBuffer(),
+                           data->buffer,
+                           static_cast<VkDeviceSize>(plan->offset),
+                           countData->buffer,
+                           static_cast<VkDeviceSize>(countOffset),
+                           static_cast<std::uint32_t>(plan->drawCount),
+                           static_cast<std::uint32_t>(plan->stride));
+}
+
+void RenderPass::drawIndexedIndirect(const BufferRange& indices,
+                                     IndexFormat format,
+                                     const Buffer& arguments,
+                                     std::int64_t offset,
+                                     int drawCount,
+                                     std::int64_t stride)
+{
+    const auto plan = planIndirectDraws(
+        arguments, offset, drawCount, stride, sizeof(DrawIndexedArguments));
+
+    if (!plan || !impl->canRecord())
+        return;
+
+    auto* data = impl->noteIndirectRead(arguments);
+
+    if (data == nullptr || !impl->bindIndexRange(indices, format)
+        || !impl->bindDescriptors())
+        return;
+
+    impl->recordIndirectRuns(
+        *plan,
+        [&](VkDeviceSize first, std::uint32_t count, std::uint32_t step)
+        {
+            vkCmdDrawIndexedIndirect(
+                impl->commandBuffer(), data->buffer, first, count, step);
+        });
+}
+
+void RenderPass::drawIndexedIndirectCount(const BufferRange& indices,
+                                          IndexFormat format,
+                                          const Buffer& arguments,
+                                          std::int64_t offset,
+                                          const Buffer& count,
+                                          std::int64_t countOffset,
+                                          int maxDrawCount,
+                                          std::int64_t stride)
+{
+    if (!getVulkanShared().supportsIndirectCount())
+    {
+        traceIndirectCountUnsupported();
+        return;
+    }
+
+    const auto plan = planIndirectDraws(
+        arguments, offset, maxDrawCount, stride, sizeof(DrawIndexedArguments));
+
+    if (!plan || !isValidDrawCountBuffer(count, countOffset) || !impl->canRecord())
+        return;
+
+    auto* data = impl->noteIndirectRead(arguments);
+    auto* countData = impl->noteIndirectRead(count);
+
+    if (data == nullptr || countData == nullptr
+        || !impl->bindIndexRange(indices, format) || !impl->bindDescriptors())
+        return;
+
+    vkCmdDrawIndexedIndirectCount(impl->commandBuffer(),
+                                  data->buffer,
+                                  static_cast<VkDeviceSize>(plan->offset),
+                                  countData->buffer,
+                                  static_cast<VkDeviceSize>(countOffset),
+                                  static_cast<std::uint32_t>(plan->drawCount),
+                                  static_cast<std::uint32_t>(plan->stride));
+}
+
+// PRECISE for a count where the device has occlusionQueryPrecise, which was
+// enabled with it; without the bit a query promises only zero or not zero,
+// which is all AnySamples asks.
+void RenderPass::nativeBeginOcclusionQuery(int index, OcclusionMode mode)
+{
+    auto pool = static_cast<VkQueryPool>(occlusionQueries->nativeQueries());
+
+    if (!impl->encoder || pool == VK_NULL_HANDLE)
+        return;
+
+    const auto precise = mode == OcclusionMode::SampleCount
+                         && getVulkanShared().supportsPreciseOcclusionQueries();
+
+    vkCmdBeginQuery(impl->commandBuffer(),
+                    pool,
+                    static_cast<std::uint32_t>(index),
+                    precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+}
+
+void RenderPass::nativeEndOcclusionQuery(int index, OcclusionMode)
+{
+    auto pool = static_cast<VkQueryPool>(occlusionQueries->nativeQueries());
+
+    if (impl->encoder && pool != VK_NULL_HANDLE)
+        vkCmdEndQuery(
+            impl->commandBuffer(), pool, static_cast<std::uint32_t>(index));
+}
+
+// Once rendering has ended: each used query copied into its eight bytes of the
+// set's host buffer, waiting on its availability, and then reset so the next
+// pass or frame may begin it - query commands on one pool execute in order, so
+// the reset lands after the copy has read it. The barrier orders this pass's
+// copies after an earlier pass's into the same bytes.
+void RenderPass::resolveOcclusionQueries()
+{
+    if (occlusionQueries == nullptr || usedQueries.empty() || !impl->encoder)
+        return;
+
+    auto pool = static_cast<VkQueryPool>(occlusionQueries->nativeQueries());
+    auto results = static_cast<VkBuffer>(occlusionQueries->nativeResults());
+
+    if (pool == VK_NULL_HANDLE || results == VK_NULL_HANDLE)
+        return;
+
+    auto buffer = impl->commandBuffer();
+
+    VkMemoryBarrier2 barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+
+    VkDependencyInfo dependency = {};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+
+    vkCmdPipelineBarrier2(buffer, &dependency);
+
+    for (const auto& used: usedQueries)
+    {
+        const auto query = static_cast<std::uint32_t>(used.index);
+
+        vkCmdCopyQueryPoolResults(
+            buffer,
+            pool,
+            query,
+            1,
+            results,
+            static_cast<VkDeviceSize>(used.index) * sizeof(std::uint64_t),
+            sizeof(std::uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+        vkCmdResetQueryPool(buffer, pool, query, 1);
+    }
+}
+
 void RenderPass::end()
 {
     // Before vkCmdEndRendering: a participant's queued draws are still draws.
@@ -490,6 +818,10 @@ void RenderPass::end()
 
     if (!impl->encoder)
         return;
+
+    // After them, so a participant's draws inside an open query count; a query
+    // may not stay active past the end of rendering.
+    endOcclusionQuery();
 
     endTimedPass(*impl->encoder);
 
@@ -502,14 +834,35 @@ void RenderPass::end()
 
     impl->encoder->commands->context->setRenderPassOpen(false);
 
+    // Outside rendering, where a copy and a reset are legal.
+    resolveOcclusionQueries();
+
     // Barriers are legal only now that vkCmdEndRendering has run.
-    if (auto* target = impl->encoder->target)
-    {
+    for (auto* target: impl->encoder->targets)
         transitionTextureForUse(buffer, *target, target->restingUse());
-        transitionDepthForUse(buffer, *target, target->depthRestingUse());
-        transitionResolvedDepthForUse(buffer, *target, imageDepthSampled);
+
+    if (auto* depth = impl->encoder->depthTarget)
+    {
+        transitionDepthForUse(buffer, *depth, depth->depthRestingUse());
+        transitionResolvedDepthForUse(buffer, *depth, imageDepthSampled);
     }
 
     impl->encoder.reset();
+}
+
+void RenderPass::setVertexDepthTextureSlice(const Texture& renderTarget,
+                                            int slice,
+                                            int slot,
+                                            TextureSampling sampling)
+{
+    setFragmentDepthTextureSlice(renderTarget, slice, slot, sampling);
+}
+
+void RenderPass::setVertexDepthTextureSlice(const Texture& renderTarget,
+                                            int slice,
+                                            int slot,
+                                            const Sampler& sampler)
+{
+    setFragmentDepthTextureSlice(renderTarget, slice, slot, sampler);
 }
 } // namespace eacp::GPU

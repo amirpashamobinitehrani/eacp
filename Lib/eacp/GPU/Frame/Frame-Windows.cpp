@@ -2,6 +2,7 @@
 
 #include "Frame.h"
 
+#include "../CommandBuffer/CopyPlan.h"
 #include "../Device/Device.h"
 #include "../Windows/D3D12Types.h"
 
@@ -95,6 +96,19 @@ struct Frame::Native
         encoder.endQuery = pass * 2 + 1;
     }
 
+    // The set the pass counts into, told which recording will write it, or
+    // null. The queries themselves are begun and resolved by the pass.
+    OcclusionQueries*
+        countOcclusionInto(const RenderPassDescriptor& descriptor) const
+    {
+        auto* queries = Frame::occlusionQueriesFor(descriptor);
+
+        if (queries != nullptr)
+            queries->notePass(commands);
+
+        return queries;
+    }
+
     bool useMsaa() const { return msaa != nullptr && msaa->texture != nullptr; }
 
     // The state every render pass needs bound before it can draw, whether it
@@ -121,10 +135,8 @@ struct Frame::Native
         // showed up on an Arm laptop: no text drew, and nothing was logged
         // without the D3D12 validation layer installed.
         //
-        // Only the SRV tables need this. The root signature declares no sampler
-        // tables at all any more - samplers are static samplers baked into it,
-        // picked by the register the shader emitted its sampler at. See
-        // TextureSampling.
+        // The per-bind sampler tables get the same treatment, with the null
+        // sampler; the TextureSampling samplers are static and need none.
         const auto nullTexture = context.getNullTextureDescriptor();
 
         if (nullTexture.ptr == 0)
@@ -133,6 +145,15 @@ struct Frame::Native
         for (auto slot = 0; slot < maxTextureSlots; ++slot)
             list->SetGraphicsRootDescriptorTable(renderTextureParam(slot),
                                                  nullTexture);
+
+        const auto nullSampler = context.getNullSamplerDescriptor();
+
+        if (!hasSamplerTables() || nullSampler.ptr == 0)
+            return;
+
+        for (auto slot = 0; slot < maxTextureSlots; ++slot)
+            list->SetGraphicsRootDescriptorTable(renderSamplerParam(slot),
+                                                 nullSampler);
     }
 
     Device* device = nullptr;
@@ -149,7 +170,8 @@ Frame::Frame(Device& device,
              void* msaaTexture,
              void* depthTexture,
              float backingScaleToUse)
-    : impl(device, drawable, msaaTexture, depthTexture)
+    : nesting(device, *this)
+    , impl(device, drawable, msaaTexture, depthTexture)
     , scale(backingScaleToUse)
 {
     device.beginFrame();
@@ -157,7 +179,8 @@ Frame::Frame(Device& device,
 }
 
 Frame::Frame(Device& device, const OffscreenTarget& target, float backingScaleToUse)
-    : impl(device, target)
+    : nesting(device, *this)
+    , impl(device, target)
     , scale(backingScaleToUse)
 {
     device.beginFrame();
@@ -166,7 +189,7 @@ Frame::Frame(Device& device, const OffscreenTarget& target, float backingScaleTo
 
 // The back buffer's size, which the off-screen path carries in a D3D12Drawable
 // of its own - the same pair of numbers beginPass sets the viewport from.
-Graphics::Point Frame::pixelSize() const
+Graphics::Point Frame::nativePixelSize() const
 {
     if (impl->drawable == nullptr)
         return {};
@@ -295,7 +318,75 @@ void Frame::flush()
     impl->open(context.acquire());
 }
 
-RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
+// Every view's target is B8G8R8A8: the swapchain's and the snapshot's.
+TextureFormat Frame::nativeDrawableFormat() const
+{
+    return TextureFormat::BGRA8Unorm;
+}
+
+// A multisampled view's picture is still in the multisample target until the
+// frame ends, so it resolves straight into the destination; a single-sampled
+// one is copied out of the back buffer, which is in RENDER_TARGET once a pass
+// has begun on it (always, off screen) and in PRESENT before, and goes back to
+// that state after.
+bool Frame::copyNativeDrawable(const Texture& destination)
+{
+    if (impl->commands == nullptr || impl->drawable == nullptr
+        || impl->drawable->backBuffer == nullptr
+        || !canCopyDrawableInto(destination))
+        return false;
+
+    auto* data = static_cast<D3D12TextureData*>(destination.nativeTexture());
+
+    if (data == nullptr || data->resource == nullptr)
+        return false;
+
+    auto* list = impl->commands->list.get();
+    auto* backBuffer = impl->drawable->backBuffer;
+
+    if (impl->useMsaa())
+    {
+        transition(list,
+                   impl->msaa->texture,
+                   D3D12_RESOURCE_STATE_RENDER_TARGET,
+                   D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+        transitionTextureForUse(list, *data, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+
+        list->ResolveSubresource(
+            data->resource.get(), 0, impl->msaa->texture, 0, impl->msaa->format);
+
+        transition(list,
+                   impl->msaa->texture,
+                   D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
+                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+    else
+    {
+        const auto resting = impl->offscreen || impl->passBegun
+                                 ? D3D12_RESOURCE_STATE_RENDER_TARGET
+                                 : D3D12_RESOURCE_STATE_PRESENT;
+
+        transition(list, backBuffer, resting, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transitionTextureForUse(list, *data, D3D12_RESOURCE_STATE_COPY_DEST);
+
+        D3D12_TEXTURE_COPY_LOCATION source = {};
+        source.pResource = backBuffer;
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+        D3D12_TEXTURE_COPY_LOCATION target = {};
+        target.pResource = data->resource.get();
+        target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+        list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+
+        transition(list, backBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, resting);
+    }
+
+    transitionTextureForUse(list, *data, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    return true;
+}
+
+RenderPass Frame::beginNativePass(const RenderPassDescriptor& descriptor)
 {
     if (impl->commands == nullptr || impl->drawable == nullptr
         || impl->drawable->backBuffer == nullptr)
@@ -350,9 +441,9 @@ RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
         list->ClearRenderTargetView(target, clearColor, 0, nullptr);
     }
 
-    // Depth is cleared to the far plane (1.0) whenever a depth buffer is bound
-    // and the pass did not ask to resume one - and the stencil plane with it, to
-    // the value the descriptor names, whenever the buffer has one.
+    // Depth is cleared to the descriptor's clearDepth whenever a depth buffer is
+    // bound and the pass did not ask to resume one - and the stencil plane with
+    // it, to the value the descriptor names, whenever the buffer has one.
     //
     // Only the load half of DepthAction exists here. There is no store to
     // choose: a D3D12 depth buffer is a committed resource that rests in
@@ -361,21 +452,23 @@ RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
     if (hasDepth && descriptor.depthAction != DepthAction::Resume)
         list->ClearDepthStencilView(impl->depth->view,
                                     depthClearFlags(impl->depth->stencil),
-                                    1.0f,
+                                    descriptor.clearDepth,
                                     descriptor.clearStencil,
                                     0,
                                     nullptr);
 
     auto* encoder = new D3D12Encoder {impl->commands, {}};
     impl->timePass(*encoder, descriptor.label);
+    auto* queries = impl->countOcclusionInto(descriptor);
 
     // The pass carries the target's pixel size so it can clamp scissor rects.
     return RenderPass(encoder,
                       static_cast<int>(impl->drawable->width),
-                      static_cast<int>(impl->drawable->height));
+                      static_cast<int>(impl->drawable->height),
+                      queries);
 }
 
-// Rendering into an app-owned texture. Depth is the target's own, from
+// Rendering into app-owned textures. Depth is the first target's own, from
 // TextureDescriptor::depth, and rests in DEPTH_WRITE for its lifetime, so it
 // costs a clear here and no barrier.
 //
@@ -391,15 +484,13 @@ RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
 //
 // A multisampled one draws into the multisample resource beside it instead, and
 // the texture itself is the *destination* of a resolve the pass records on its
-// way out - resolveMultisampledTarget, which the encoder's resolveTarget carries
+// way out - resolveMultisampledTarget, which the encoder's resolveTargets carry
 // it to. So the texture is never in RENDER_TARGET on that path, and this leaves
 // its state alone for the resolve to move.
-RenderPass Frame::beginPass(const Texture& target,
-                            const RenderPassDescriptor& descriptor)
+RenderPass Frame::beginMultiTargetPass(std::span<const ColorTarget> targets,
+                                       const RenderPassDescriptor& descriptor)
 {
-    auto* data = static_cast<D3D12TextureData*>(target.nativeTexture());
-
-    if (impl->commands == nullptr || data == nullptr || !target.isRenderTarget())
+    if (impl->commands == nullptr || !canRenderInto(targets, descriptor))
         return RenderPass(nullptr);
 
     auto& context = impl->context();
@@ -407,40 +498,73 @@ RenderPass Frame::beginPass(const Texture& target,
 
     impl->bindRootState(context, list);
 
-    if (data->isMultisampled())
-    {
-        // Back from the RESOLVE_SOURCE the last pass's resolve left it in. It
-        // rests in RENDER_TARGET otherwise, exactly as the drawable's MSAA
-        // target does.
-        if (data->msaaState != D3D12_RESOURCE_STATE_RENDER_TARGET)
-        {
-            transition(list,
-                       data->msaaResource.get(),
-                       data->msaaState,
-                       D3D12_RESOURCE_STATE_RENDER_TARGET);
+    auto attachments =
+        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, maxColorAttachments> {};
+    auto* encoder = new D3D12Encoder {impl->commands, {}};
 
-            data->msaaState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    for (auto index = std::size_t {0}; index < targets.size(); ++index)
+    {
+        auto* data =
+            static_cast<D3D12TextureData*>(targets[index].texture->nativeTexture());
+
+        if (data->isMultisampled())
+        {
+            // Back from the RESOLVE_SOURCE the last pass's resolve left it in.
+            // It rests in RENDER_TARGET otherwise, exactly as the drawable's
+            // MSAA target does.
+            if (data->msaaState != D3D12_RESOURCE_STATE_RENDER_TARGET)
+            {
+                transition(list,
+                           data->msaaResource.get(),
+                           data->msaaState,
+                           D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+                data->msaaState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            }
+
+            // Recorded when the pass ends rather than when the frame does,
+            // because what reads a texture target may be the very next thing on
+            // the list.
+            encoder->resolveTargets.add(data);
+        }
+        else
+        {
+            transitionTextureForUse(list, *data, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
+
+        const auto& target = targets[index];
+        attachments[index] = d3d12ColorTargetView(
+            *data, target.level, target.slice, target.layerCount);
+
+        if (attachments[index].ptr == 0)
+        {
+            delete encoder;
+            return RenderPass(nullptr);
         }
     }
-    else
-    {
-        transitionTextureForUse(list, *data, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    }
 
-    const auto attachment = data->attachmentView();
-    auto hasDepth = data->hasDepth();
+    const auto& firstTarget = targets[0];
+    const auto depthFrom = depthSource(targets, descriptor);
+    auto* depthOwner =
+        static_cast<D3D12TextureData*>(depthFrom.texture->nativeTexture());
+    const auto dsv = d3d12DepthTargetView(
+        *depthOwner, depthFrom.level, depthFrom.slice, depthFrom.layerCount);
+    auto hasDepth = dsv.ptr != 0;
 
     // The return half of the pair RenderPass::setFragmentDepthTexture opens: a
     // depth buffer an earlier pass on this frame *read* is in
     // PIXEL_SHADER_RESOURCE, and attaching it needs it back in DEPTH_WRITE. A
     // target whose depth was never made sampleable has never left that state and
     // the helper records nothing.
-    transitionDepthForUse(list, *data, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    transitionDepthForUse(list, *depthOwner, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
-    list->OMSetRenderTargets(1, &attachment, FALSE, hasDepth ? &data->dsv : nullptr);
+    list->OMSetRenderTargets(static_cast<UINT>(targets.size()),
+                             attachments.data(),
+                             FALSE,
+                             hasDepth ? &dsv : nullptr);
 
-    auto width = target.width();
-    auto height = target.height();
+    auto width = levelWidth(*targets[0].texture, firstTarget.level);
+    auto height = levelHeight(*targets[0].texture, firstTarget.level);
 
     D3D12_VIEWPORT viewport = {};
     viewport.Width = static_cast<float>(width);
@@ -459,34 +583,31 @@ RenderPass Frame::beginPass(const Texture& target,
     // two backends draw differently. Tests/GPU/StencilTests.cpp pins it.
     list->OMSetStencilRef(0);
 
-    if (descriptor.clear)
+    for (auto index = std::size_t {0}; index < targets.size(); ++index)
     {
-        const auto& color = descriptor.clearColor;
+        if (!targets[index].clear)
+            continue;
+
+        const auto& color = targets[index].clearColor;
         const float clearColor[4] = {color.r, color.g, color.b, color.a};
-        list->ClearRenderTargetView(attachment, clearColor, 0, nullptr);
+        list->ClearRenderTargetView(attachments[index], clearColor, 0, nullptr);
     }
 
-    // Cleared to the far plane whenever there is one and the pass is not
-    // resuming, matching the drawable pass above - and, as there, with no store
-    // to decide, the resource keeping what was written to it either way.
+    // Cleared to clearDepth whenever there is one and the pass is not resuming,
+    // matching the drawable pass above - and, as there, with no store to
+    // decide, the resource keeping what was written to it either way.
     if (hasDepth && descriptor.depthAction != DepthAction::Resume)
-        list->ClearDepthStencilView(data->dsv,
-                                    depthClearFlags(data->hasStencil()),
-                                    1.0f,
+        list->ClearDepthStencilView(dsv,
+                                    depthClearFlags(depthOwner->hasStencil()),
+                                    descriptor.clearDepth,
                                     descriptor.clearStencil,
                                     0,
                                     nullptr);
 
-    auto* encoder = new D3D12Encoder {impl->commands, {}};
-
-    // Recorded when the pass ends rather than when the frame does, because what
-    // reads a texture target may be the very next thing on the list.
-    if (data->isMultisampled())
-        encoder->resolveTarget = data;
-
     impl->timePass(*encoder, descriptor.label);
+    auto* queries = impl->countOcclusionInto(descriptor);
 
-    return RenderPass(encoder, width, height);
+    return RenderPass(encoder, width, height, queries);
 }
 
 // A compute pass on the frame's own recording. The graphics and compute root
@@ -526,9 +647,20 @@ ComputePass Frame::beginCompute(std::string_view label, DispatchOrder order)
     return ComputePass(encoder, order);
 }
 
-bool Frame::isValid() const
+bool Frame::isNativeValid() const
 {
     return impl->commands != nullptr && impl->drawable != nullptr
            && impl->drawable->backBuffer != nullptr;
+}
+
+void Frame::resumeRecording()
+{
+    if (impl->commands != nullptr)
+        impl->context().setOpenRecording(impl->commands);
+}
+
+void* Frame::nativeRecording() const
+{
+    return impl->commands;
 }
 } // namespace eacp::GPU

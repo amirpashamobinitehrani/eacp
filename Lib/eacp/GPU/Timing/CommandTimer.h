@@ -18,11 +18,12 @@ class Device;
 class CommandTimer
 {
 public:
-    // Where the pass's two samples go in nativeSamples() - 2 * the result and
-    // the one after - or -1 when the pass is not being timed, which is what an
-    // unlabelled pass and an unsupported device get. There is no ceiling: every
-    // maxTimedPasses passes take a fresh set of samples, so nativeSamples() is
-    // to be asked after beginPass, for the pass just begun.
+    // Where the pass's samples go in nativeSamples() - the result's place in the
+    // backend's layout, two a pass on D3D12 and Vulkan and four on Metal - or -1
+    // when the pass is not being timed, which is what an unlabelled pass and an
+    // unsupported device get. There is no ceiling: every maxTimedPasses passes
+    // take a fresh set of samples, so nativeSamples() is to be asked after
+    // beginPass, for the pass just begun.
     int beginPass(std::string_view label, Device& device, void* nativeCommandBuffer);
 
     // Where a timed pass writes its samples. Null when nothing is being timed.

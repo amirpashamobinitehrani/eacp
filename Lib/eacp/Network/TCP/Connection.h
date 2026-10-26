@@ -62,7 +62,18 @@ public:
     [[nodiscard]] bool isOpen() const;
     void close();
 
+    // Wakes a send or receive blocked on this stream in another thread, and
+    // ends every later one at once: a receive reports the stream closed or
+    // throws. Bytes already sent still reach the peer. Safe from any thread
+    // while the stream is open; close() is not, so interrupt, join, close.
+    void interrupt();
+
     [[nodiscard]] const Address& address() const;
+
+    // Re-arms the per-call io timeout on an open stream. A server reads a
+    // request under a short one so stop() can interrupt an idle peer, then
+    // lets the reply block for as long as the peer takes to drain it.
+    void setIoTimeout(Time::MS timeout);
 
     // Writes every byte, looping past partial writes. Throws on failure.
     void send(std::string_view bytes);

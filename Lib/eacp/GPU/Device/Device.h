@@ -7,6 +7,7 @@
 #include "../Pipeline/RenderPipeline.h"
 #include "../Shader/ShaderLibrary.h"
 #include "../Shader/ShaderSource.h"
+#include "../Texture/Sampler.h"
 #include "../Texture/Texture.h"
 #include "../Timing/FrameTimer.h"
 
@@ -26,6 +27,8 @@ class Image;
 
 namespace eacp::GPU
 {
+class Frame;
+struct FrameNesting;
 // The GPU device (MTLDevice + command queue on Metal). Owns the resource
 // factories. Most apps use the process-wide Device::shared().
 //
@@ -112,6 +115,15 @@ public:
     Texture makeTexture(const TextureDescriptor& descriptor,
                         const void* pixels = nullptr);
 
+    // Any kind of texture, filled level by level and slice by slice: the
+    // shape a container file (.dds, .ktx) hands over. See Texture's
+    // constructor of the same shape. A name of its own rather than a
+    // makeTexture overload, which a C array of subresources would decay past
+    // into the pixel pointer.
+    Texture makeTextureFromSubresources(
+        const TextureDescriptor& descriptor,
+        std::span<const TextureSubresource> subresources);
+
     // A 2D texture sized from a decoded image and uploaded from its RGBA8
     // pixels. The image is taken as tightly packed 8-bit RGBA (what
     // Graphics::Image holds), so the format is always RGBA8Unorm. An invalid or
@@ -123,6 +135,23 @@ public:
     // camera and video frames. Returns an invalid texture on backends without
     // zero-copy support (Windows for now), where Texture::update is the path.
     Texture wrapPixelBuffer(void* nativePixelBuffer);
+
+    // The sampler a descriptor describes, made once per distinct descriptor and
+    // kept for this Device's lifetime: asking again with an equal descriptor
+    // returns the same native object, so a renderer can call this per draw. Safe
+    // from any thread. Invalid on a device that is not, or when the backend
+    // refused the descriptor.
+    //
+    // The four TextureSampling configurations are among these:
+    // makeSampler(SamplerDescriptor::from(sampling)) is the sampler the
+    // TextureSampling overloads bind.
+    Sampler makeSampler(const SamplerDescriptor& descriptor);
+
+    // Whether a Sampler bound per draw reaches the shader. True on Metal and
+    // Vulkan; on D3D12 false where the driver ignores the offset of a sampler
+    // descriptor table (see SAMPLERS.md), in which case the per-bind sampler
+    // registers hold one fixed static sampler and a Sampler bind is dropped.
+    bool supportsPerBindSamplers() const;
 
     ShaderLibrary makeShaderLibrary(const ShaderSource& source);
 
@@ -180,6 +209,124 @@ public:
     // Only the storage binds: fill, dispatchIndirect and the vertex and index
     // ranges are four-byte everywhere, this backend included.
     int storageBufferOffsetAlignment() const;
+
+    // How many storage-buffer slots a compute kernel may bind on this device:
+    // ComputePass::maxBufferSlots (16) on Metal, the same or the device's own
+    // per-stage storage-buffer limit on Vulkan, and
+    // ComputePass::portableBufferSlots (8) on D3D12, whose root signature has no
+    // room for more. A ComputePass bind at a slot at or past it is dropped. The
+    // codegen layer stays inside the portable eight everywhere; this is for a
+    // hand-written kernel that needs more. An invalid Device answers zero.
+    int maxComputeBufferSlots() const;
+
+    // Whether RenderPass::drawIndirectCount and drawIndexedIndirectCount, whose
+    // number of draws is read from a buffer, reach the GPU. False on Metal,
+    // which has no such draw; true on D3D12; on Vulkan where the device has
+    // drawIndirectCount (core 1.2) or VK_KHR_draw_indirect_count. Where it is
+    // false those calls are refused with a trace. The other indirect draws work
+    // everywhere.
+    bool supportsIndirectCount() const;
+
+    // Whether OcclusionQueries can be made and a pass counts into them: every
+    // device on all three backends - Metal's visibility result buffer, D3D12's
+    // occlusion query heap and Vulkan's occlusion query pool are all core. An
+    // invalid Device answers false.
+    bool supportsOcclusionQueries() const;
+
+    // Whether OcclusionMode::SampleCount is an exact count of the samples that
+    // passed, rather than only zero or not zero. True on Metal and D3D12; on
+    // Vulkan where the device has occlusionQueryPrecise, which is enabled
+    // wherever it is offered. Where it is false a SampleCount query still
+    // answers whether anything passed.
+    bool supportsOcclusionSampleCounts() const;
+
+    // How many texture slots a render stage may bind on this device, each with
+    // its per-bind sampler: RenderPass::maxStageTextureSlots (16) on Metal,
+    // whose sixteen sampler indices are the ceiling though it has 31 texture
+    // ones; the same on Vulkan, clamped to the device's per-stage sampler and
+    // sampled-image limits (which the spec puts at 16 or more); and eight on
+    // D3D12, whose texture registers stop under the storage buffers at t8 and
+    // whose root signature has no room for more tables. A bind at a slot at or
+    // past it is dropped. The codegen layer and compute keep to eight
+    // everywhere. An invalid Device answers zero.
+    int maxTextureSlots() const;
+
+    // Whether RenderPass::setVertexTexture and setVertexDepthTexture reach a
+    // vertex shader. True on every backend with a device.
+    bool supportsVertexTextures() const;
+
+    // Whether the vertex and fragment stages share one set of texture slots, so
+    // that a vertex bind at slot n and a fragment bind at slot n are the same
+    // binding and the last one wins. False on Metal, which has an index space
+    // per stage; true on D3D12, whose texture and sampler tables are visible to
+    // every stage, and on Vulkan, whose combined image samplers are declared
+    // for both. Portable code binds one texture per slot across the two stages.
+    bool stagesShareTextureSlots() const;
+
+    // The most layers a TwoDArray, or cubes times six a CubeArray, may have:
+    // 2048 on all three backends (Metal's, D3D12's required limit, Vulkan's
+    // maxImageArrayLayers). 0 on an invalid Device.
+    int maxTextureLayers() const;
+
+    // The largest width, height or depth of a ThreeD texture: 2048 on Metal
+    // and D3D12, maxImageDimension3D on Vulkan. 0 on an invalid Device.
+    int maxTextureSize3D() const;
+
+    // Whether TextureType::CubeArray textures can be created: every Mac and
+    // Apple4 and later on Metal, every D3D12 device, Vulkan's imageCubeArray.
+    bool supportsCubeArrays() const;
+
+    // Whether a vertex shader may choose the layer a primitive lands in, which
+    // is what a pass with ColorTarget::layerCount above 1 needs: every Mac and
+    // Apple5 and later on Metal ([[render_target_array_index]]), D3D12's
+    // VPAndRTArrayIndexFromAnyShaderFeedingRasterizerSupportedWithoutGSEmulation
+    // (SV_RenderTargetArrayIndex), and Vulkan's shaderOutputLayer or
+    // VK_EXT_shader_viewport_index_layer (gl_Layer). Without it a shader
+    // writing the index is not a pipeline the device builds; a layered pass
+    // still runs, its primitives landing in the first layer.
+    bool supportsLayeredRendering() const;
+
+    // Whether a kernel can write a texture of this format on this device: a
+    // texture asked for computeWrite in it is created rather than invalid, and
+    // ComputePass::setOutputTexture and its siblings bind it. Every format
+    // the portable supportsComputeWrite() set names, and past it the device's
+    // own answer: every uncompressed format but BGRA8Unorm, the sRGB ones and
+    // RGB9E5Float on Metal, the packed and integer formats included; on D3D12
+    // the driver's D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE; on Vulkan
+    // VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT. BGRA8Unorm, every sRGB format,
+    // RGB9E5Float and the block formats are refused everywhere, so the
+    // drawable's format as a kernel output is a mistake the Mac catches too.
+    // An invalid Device answers no.
+    bool supportsComputeWrite(TextureFormat format) const;
+
+    // Whether a kernel can also *read* such a texture through the bind it
+    // writes with - access::read_write in MSL, a load from an RWTexture2D in
+    // HLSL, imageLoad from an image declared with the format's qualifier in
+    // GLSL - so it can read a texel and write it back in one dispatch. Metal's
+    // read-write tier decides there: tier 1 takes R32Float, R32Uint and
+    // R32Sint, tier 2 (every Apple-silicon Mac) adds RGBA8Unorm, RGBA16Float,
+    // RGBA32Float, R16Float and R8Unorm and the Uint and Sint formats of
+    // those shapes, and no tier takes a two-channel, packed or 16-bit unorm
+    // format. D3D12 asks D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD, which the
+    // R32 formats always have and the rest have on most hardware; Vulkan
+    // answers as for a write. Reading through setInputTexture needs none of
+    // this: any format a texture has is readable there.
+    bool supportsComputeReadWrite(TextureFormat format) const;
+
+    // Whether Frame::generateMipmaps (and CommandBuffer's) can fill a
+    // texture of this format's chain on the GPU. Never a block-compressed or
+    // an integer format, there being nothing to average in either, nor
+    // RGB9E5Float, which no API's generator promises to write (its chain is
+    // the CPU's, from `mipmapped`). Metal's
+    // blit filters every other one, the 32-bit floats only where the device
+    // filters them (supports32BitFloatFiltering, every Apple-silicon Mac);
+    // D3D12 runs eacp's own box-filter kernel through typed UAV loads and
+    // stores, so it asks D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD and _STORE
+    // (BGRA8Unorm and every sRGB format have neither, so an sRGB chain on
+    // D3D12 is the CPU's, from `mipmapped`); Vulkan blits level to level and asks
+    // VK_FORMAT_FEATURE_BLIT_SRC_BIT, BLIT_DST_BIT and
+    // SAMPLED_IMAGE_FILTER_LINEAR_BIT. An invalid Device answers no.
+    bool supportsMipGeneration(TextureFormat format) const;
 
     // How many bytes of threadgroup memory one group may declare on this
     // device - the budget every `shared<>` array in a kernel is spent out of,
@@ -289,7 +436,7 @@ public:
     // of its pools to write into from this, so that a renderer streaming
     // per-frame data has nothing to call at the frame boundary and therefore
     // nothing to forget - see StreamingBuffers for why that matters.
-    constexpr std::uint64_t frameIndex() const { return frameCount; }
+    std::uint64_t frameIndex() const;
 
     // Called by Frame's constructor on both backends, including the off-screen
     // one. An off-screen frame blocks until the GPU is done, so nothing it
@@ -301,6 +448,23 @@ public:
     // Out of line because it also starts the frame timer, which is the one
     // thing both backends want done identically at this moment.
     void beginFrame();
+
+    // Called by Frame's constructor before anything else, and by its
+    // destructor after everything else: the frames open on this device are a
+    // stack, so a Frame opened while another is open - GPUView::renderFrame
+    // called from inside a render() - is nested in it. Entering a nested frame
+    // flushes the open one, so what it recorded reaches the queue first, and
+    // suspends the frame timer, so the nested frame is not timed and
+    // beginFrame does not advance frameIndex for it: its streamed data and its
+    // timestamps are the outer frame's. Leaving gives the outer frame its
+    // recording and its timer back. What enterFrame returns is what
+    // leaveFrame takes: the outer frame, null for one opened on its own, and
+    // the timer slot it was timing into.
+    FrameNesting enterFrame(Frame& frame);
+    void leaveFrame(const FrameNesting& nesting);
+
+    // Whether a Frame is open on this device.
+    bool isFrameOpen() const;
 
     // What the GPU spent on the most recent frame it has finished: every pass
     // that was given a label, plus the frame end to end.
@@ -323,7 +487,7 @@ public:
     bool supportsPassTimings() const;
 
     // Internal: the timer Frame drives. Apps read lastFrameTimings().
-    constexpr FrameTimer& frameTimer() { return timer; }
+    FrameTimer& frameTimer();
 
     // How many GPU buffers have been created on this device since it came up.
     //
@@ -332,11 +496,11 @@ public:
     // while the drawing repeats is allocation churn in the frame loop -
     // newBufferWithBytes on Metal, a committed resource on D3D12 - which is
     // what the assertions in Tests/GPU are there to catch.
-    constexpr int buffersCreated() const { return bufferCount; }
+    int buffersCreated() const;
 
     // Called by Buffer's constructor on both backends, for buffers that got
     // real storage.
-    constexpr void noteBufferCreated() { ++bufferCount; }
+    void noteBufferCreated();
 
     // This Device's own T: one, made on first use and
     // destroyed with the Device, before the backend device itself. For state
@@ -360,10 +524,18 @@ private:
     // Makes this Device follow the main thread rather than the one that
     // constructed it. Private because Device::shared() is the only caller and
     // it is a member, so nothing outside can move a Device's ownership.
-    constexpr void followMainThread() { mainThreadOwned = true; }
+    void followMainThread();
 
     struct Native;
     Pimpl<Native> impl;
+
+    // Builds the backend's sampler for a descriptor and keeps it in Native.
+    // Called by makeSampler for a descriptor not yet cached.
+    void* createNativeSampler(const SamplerDescriptor& descriptor);
+
+    struct SamplerCache;
+    static std::shared_ptr<SamplerCache> makeSamplerCache();
+    std::shared_ptr<SamplerCache> samplers = makeSamplerCache();
 
     FrameTimer timer;
 
@@ -378,5 +550,8 @@ private:
 
     std::mutex perDeviceMutex;
     std::map<std::type_index, std::shared_ptr<void>> perDeviceObjects;
+
+    Frame* openFrame = nullptr;
+    int openFrames = 0;
 };
 } // namespace eacp::GPU

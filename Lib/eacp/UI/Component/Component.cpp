@@ -2,6 +2,7 @@
 
 #include "../DragAndDrop/DragAndDrop.h"
 #include "../Host/ComponentHost.h"
+#include "../Render/Layer.h"
 
 #include <ranges>
 
@@ -11,6 +12,11 @@ Component::Component() = default;
 
 Component::~Component()
 {
+    lifetimeToken.reset();
+
+    if (capturingLayer != nullptr)
+        capturingLayer->setContent(nullptr);
+
     // Before unlinking, while walking up to the host still reaches it: the host
     // may be holding this as its root, its hover or its press capture, and any
     // of those outliving the component is a dangling write later.
@@ -77,6 +83,11 @@ void Component::addChildComponent(Component& child)
     if (child.needsRecording())
         child.markAncestorsDirty();
 
+    // Removing it stopped whatever it animated, so joining a host is where a
+    // continuous GPUComponent inside it starts again.
+    if (auto* found = findHost())
+        found->subtreeAttached(child);
+
     invalidateHost();
 }
 
@@ -101,6 +112,12 @@ void Component::removeChildComponent(Component& child)
     // tell the host when one of those components is later destroyed.
     if (auto* found = findHost())
         found->forgetAnimationsIn(child);
+
+    // A captured subtree leaving the tree is let go of rather than followed:
+    // the layer drew it in its place below the owner, and there is no such
+    // place any more.
+    if (child.capturingLayer != nullptr)
+        child.capturingLayer->setContent(nullptr);
 
     child.parent = nullptr;
     children.removeAllMatches(&child);
@@ -176,9 +193,16 @@ void Component::setInterceptsMouseClicks(bool shouldIntercept)
     interceptsMouseClicks = shouldIntercept;
 }
 
-void Component::setMouseCursor(eacp::Graphics::MouseCursor cursorToUse)
+void Component::setMouseCursor(const eacp::Graphics::MouseCursor& cursorToUse)
 {
+    if (cursor == cursorToUse)
+        return;
+
     cursor = cursorToUse;
+
+    if (mouseOver)
+        if (auto* owner = getHost())
+            owner->updateMouseCursor();
 }
 
 void Component::setWantsKeyboardFocus(bool shouldWantFocus)
@@ -340,8 +364,20 @@ void Component::markAncestorsDirty()
 
 void Component::invalidateHost()
 {
+    markCapturingLayersStale();
+
     if (auto* found = findHost())
         found->repaint();
+}
+
+// Up from here rather than only here, since a layer capturing an ancestor
+// draws this component too -- and every layer on the way, since one captured
+// inside another is part of what the outer one drew.
+void Component::markCapturingLayersStale()
+{
+    for (auto* current = this; current != nullptr; current = current->parent)
+        if (current->capturingLayer != nullptr)
+            current->capturingLayer->contentChanged();
 }
 
 float Component::measureText(std::string_view text, const Font& font) const
@@ -356,6 +392,13 @@ Font Component::getHostFont() const
     auto* found = findHost();
 
     return found != nullptr ? found->getFont() : Font {};
+}
+
+const Theme& Component::getHostTheme() const
+{
+    auto* found = findHost();
+
+    return found != nullptr ? found->getTheme() : defaultTheme();
 }
 
 bool Component::hitTest(Point localPoint) const
@@ -447,12 +490,37 @@ bool Component::isVisible() const
     return visible;
 }
 
+bool Component::isShowing() const
+{
+    auto* current = this;
+
+    for (; current->parent != nullptr; current = current->parent)
+        if (!current->visible)
+            return false;
+
+    return current->visible && current->host != nullptr;
+}
+
 bool Component::getInterceptsMouseClicks() const
 {
     return interceptsMouseClicks;
 }
 
-eacp::Graphics::MouseCursor Component::getMouseCursor() const
+void Component::setPaintingIsUnclipped(bool shouldBeUnclipped)
+{
+    if (paintingIsUnclipped == shouldBeUnclipped)
+        return;
+
+    paintingIsUnclipped = shouldBeUnclipped;
+    repaint();
+}
+
+bool Component::isPaintingUnclipped() const
+{
+    return paintingIsUnclipped;
+}
+
+const eacp::Graphics::MouseCursor& Component::getMouseCursor() const
 {
     return cursor;
 }
@@ -480,7 +548,22 @@ void Component::mouseUp(const MouseEvent&) {}
 
 void Component::mouseMove(const MouseEvent&) {}
 
+void Component::mouseDoubleClick(const MouseEvent&) {}
+
+std::weak_ptr<bool> Component::getLifetimeToken() const
+{
+    if (lifetimeToken == nullptr)
+        lifetimeToken = std::make_shared<bool>(true);
+
+    return lifetimeToken;
+}
+
 bool Component::mouseWheelMove(const MouseEvent&)
+{
+    return false;
+}
+
+bool Component::mouseMagnify(const MouseEvent&)
 {
     return false;
 }
@@ -529,6 +612,15 @@ bool Component::keyUp(const KeyEvent&)
 ComponentHost* Component::getHost() const
 {
     return findHost();
+}
+
+bool Component::startFileDrag(const Vector<std::string>& paths,
+                              const eacp::Graphics::FileDragOptions& options)
+{
+    if (auto* owner = getHost())
+        return owner->startFileDrag(paths, options);
+
+    return false;
 }
 
 bool Component::isMouseOver() const

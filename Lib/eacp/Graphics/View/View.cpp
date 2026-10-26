@@ -6,6 +6,19 @@
 
 namespace eacp::Graphics
 {
+namespace
+{
+// Whether `view` is `ancestor` or sits somewhere below it. Null is in nothing.
+bool isWithin(const View* view, const View& ancestor)
+{
+    for (; view != nullptr; view = view->getParent())
+        if (view == &ancestor)
+            return true;
+
+    return false;
+}
+} // namespace
+
 Image View::renderNativeContent(float)
 {
     return {};
@@ -36,6 +49,12 @@ View& View::setHandlesTouchEvents(bool value)
 View& View::setGrabsFocusOnMouseDown(bool value)
 {
     properties.grabsFocusOnMouseDown = value;
+    return *this;
+}
+
+View& View::setIgnoresMouseEvents(bool value)
+{
+    properties.ignoresMouseEvents = value;
     return *this;
 }
 
@@ -95,6 +114,20 @@ void View::mouseMoved(const MouseEvent&) {}
 void View::mouseEntered(const MouseEvent&) {}
 void View::mouseExited(const MouseEvent&) {}
 void View::mouseWheel(const MouseEvent&) {}
+void View::mouseMagnify(const MouseEvent&) {}
+
+bool View::fileDragEnter(const Vector<std::string>&, Point)
+{
+    return false;
+}
+
+bool View::fileDragMove(const Vector<std::string>&, Point)
+{
+    return false;
+}
+
+void View::fileDragExit() {}
+void View::filesDropped(const Vector<std::string>&, Point) {}
 
 void View::touchBegan(const TouchEvent&) {}
 void View::touchMoved(const TouchEvent&) {}
@@ -141,6 +174,13 @@ void View::addSubview(View& view)
     view.parent = this;
     subviews.add(&view);
 
+    // Key focus is the window's, and a subtree joining another tree is no
+    // longer the root of anything: whatever it had focused is dropped rather
+    // than carried up, as AppKit ignores makeFirstResponder for a view that is
+    // in no window. Left in place it would also misroute dispatchKeyEvent
+    // called on the subtree's former root.
+    view.keyFocus = nullptr;
+
     viewAdded(view);
 }
 
@@ -148,14 +188,26 @@ void View::removeSubview(View& view)
 {
     if (subviews.removeAllMatches(&view) > 0)
     {
-        if (hoveredView == &view)
-            hoveredView = nullptr;
-
-        if (mouseDownTarget == &view)
-            mouseDownTarget = nullptr;
-
+        clearMouseTargetsIn(view);
         forgetTouchesIn(view);
+        forgetKeyFocusIn(view);
         viewRemoved(view);
+    }
+}
+
+// hoveredView/mouseDownTarget are recorded on whichever view the platform
+// event arrived at -- usually the window root -- and can point anywhere below
+// it. Clearing them on the whole ancestor chain keeps them from dangling when
+// the removed subtree is destroyed.
+void View::clearMouseTargetsIn(View& view)
+{
+    for (auto* ancestor = this; ancestor != nullptr; ancestor = ancestor->parent)
+    {
+        if (isWithin(ancestor->hoveredView, view))
+            ancestor->hoveredView = nullptr;
+
+        if (isWithin(ancestor->mouseDownTarget, view))
+            ancestor->mouseDownTarget = nullptr;
     }
 }
 
@@ -185,7 +237,7 @@ void View::scaleToFit(ChildViews views)
 
 View* View::hitTest(const Point& point)
 {
-    if (!getLocalBounds().contains(point))
+    if (properties.ignoresMouseEvents || !getLocalBounds().contains(point))
         return nullptr;
 
     for (auto child: std::ranges::reverse_view(subviews))
@@ -300,6 +352,26 @@ bool View::dispatchKeyEvent(const KeyEvent& event)
     if (auto* window = getWindow())
         window->events.input.keyEvent(event);
 
+    // The parent is read before the view is asked, because a handler may well
+    // tear its own view down (a popup dismissed by the key that closes it), and
+    // a view gone that way has kept the key or has nowhere left to pass it.
+    auto* view = keyFocus != nullptr ? keyFocus : this;
+
+    while (view != nullptr)
+    {
+        auto* next = view->parent;
+
+        if (view->handleKeyEvent(event))
+            return true;
+
+        view = next;
+    }
+
+    return false;
+}
+
+bool View::handleKeyEvent(const KeyEvent& event)
+{
     keyKept = true;
 
     if (event.type == KeyEventType::Down)
@@ -308,6 +380,42 @@ bool View::dispatchKeyEvent(const KeyEvent& event)
         keyUp(event);
 
     return keyKept;
+}
+
+View* View::getRoot()
+{
+    auto* root = this;
+
+    while (root->parent != nullptr)
+        root = root->parent;
+
+    return root;
+}
+
+const View* View::getRoot() const
+{
+    return const_cast<View*>(this)->getRoot();
+}
+
+// One record per tree rather than a flag per view, so that focusing one view is
+// by construction unfocusing the last, as making a view first responder resigns
+// the one before it.
+void View::takeKeyFocus()
+{
+    getRoot()->keyFocus = this;
+}
+
+bool View::holdsKeyFocus() const
+{
+    return getRoot()->keyFocus == this;
+}
+
+void View::forgetKeyFocusIn(View& removed)
+{
+    auto* root = getRoot();
+
+    if (isWithin(root->keyFocus, removed))
+        root->keyFocus = nullptr;
 }
 
 void View::passKeyOn()
@@ -386,6 +494,9 @@ void View::handleMouseEvent(const MouseEvent& event)
             break;
         case MouseEventType::Wheel:
             mouseWheel(event);
+            break;
+        case MouseEventType::Magnify:
+            mouseMagnify(event);
             break;
     }
 }
@@ -520,22 +631,8 @@ void View::sendTouchAsMouse(const TouchEvent& event)
 
 void View::forgetTouchesIn(View& removed)
 {
-    auto* root = this;
-
-    while (root->parent != nullptr)
-        root = root->parent;
-
-    auto isInRemoved = [&removed](const View* view)
-    {
-        for (; view != nullptr; view = view->parent)
-            if (view == &removed)
-                return true;
-
-        return false;
-    };
-
-    root->touches.removeIndexesMatching([&](const ActiveTouch& t)
-                                        { return isInRemoved(t.view); });
+    getRoot()->touches.removeIndexesMatching([&](const ActiveTouch& t)
+                                             { return isWithin(t.view, removed); });
 }
 
 Insets View::getSafeAreaInsets() const

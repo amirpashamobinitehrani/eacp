@@ -42,55 +42,75 @@ set(gpu_test_sources
         CommandBufferTimingTests.cpp
         CommandBufferWaitTests.cpp
         CompressedTextureTests.cpp
+        CopyTests.cpp
         ComputeBufferRangeTests.cpp
+        ComputeBufferSlotTests.cpp
         ConcurrentPassTests.cpp
         CoordinateSpaceTests.cpp
         CubeTextureTests.cpp
         CullModeTests.cpp
         DepthActionTests.cpp
+        DepthBiasTests.cpp
+        DepthClearTests.cpp
         DepthTextureTests.cpp
         DevicePresenceTests.cpp
         Dispatch3DTests.cpp
         DispatchTimingTests.cpp
         ExternalGeometryTests.cpp
+        FormatTargetTests.cpp
+        TextureFormatTests.cpp
+        DrawableCopyTests.cpp
+        MultiViewFrameTests.cpp
         FrameComputeTests.cpp
+        FrameRedirectTests.cpp
         FrameTimingTests.cpp
         GPUSmokeTests.cpp
         GPUSnapshotTests.cpp
         GroupReductionTests.cpp
         HoistingTests.cpp
         IndirectDispatchTests.cpp
+        IndirectDrawTests.cpp
         InPlaceComputeTests.cpp
         InPlaceRecordTests.cpp
         IntrinsicTests.cpp
         KernelCacheTests.cpp
+        KernelImageTests.cpp
         LargeBufferTests.cpp
         MipmapTests.cpp
         MultiDeviceTests.cpp
         MultisampledTargetTests.cpp
+        MipGenerationTests.cpp
+        MultiTargetTests.cpp
+        OcclusionQueryTests.cpp
         PackedBFloat16Tests.cpp
         PackedHalfTests.cpp
         PackedQuantizedTests.cpp
         PipelineStateTests.cpp
         ProgramGraphTests.cpp
+        RecordedCountsTests.cpp
         RenderBufferRangeTests.cpp
         RenderTargetDepthTests.cpp
         RenderTargetTests.cpp
+        SamplerTests.cpp
         ScissorTests.cpp
         SelectTests.cpp
         ShaderBlendTests.cpp
         ShaderCompileTests.cpp
+        ShadowSamplingTests.cpp
         SharedMemoryTests.cpp
         SimdMatrixTests.cpp
         SpriteBatchTests.cpp
+        StageBuiltInTests.cpp
         StencilTests.cpp
         StorePlacementTests.cpp
         StreamedRangeDrawTests.cpp
         StreamingBufferTests.cpp
+        SubresourceTargetTests.cpp
         SuppliedMipChainTests.cpp
         TextureCreationTests.cpp
         TextureReadTests.cpp
         TextureRegionTests.cpp
+        TextureArrayTests.cpp
         TextureSamplingTests.cpp
         TextureUpdateTests.cpp
         ThreadGroupSizeTests.cpp
@@ -100,6 +120,8 @@ set(gpu_test_sources
         UIntScalarTests.cpp
         UIntVectorTests.cpp
         VertexFormatTests.cpp
+        VertexOnlyPipelineTests.cpp
+        VertexTextureTests.cpp
         ViewportTests.cpp
         TestMain.cpp)
 
@@ -150,27 +172,14 @@ endif ()
 # display with X11WindowTests: no window manager there means the windows
 # overlap at the same place, and the one underneath is sent an Expose that its
 # presenting view answers with a repaint - a frame the case never asked for.
-# They take the same lock the X11 cases do, which serialises every
-# window-opening case on the lane against every other. The names come out of
-# the source, which is a configure dependency so that a new or renamed case is
-# picked up rather than left unlocked.
+# The Present group takes the same lock the X11 groups do, which serialises
+# every window-opening group on the lane against every other.
 if (LINUX AND NOT CMAKE_CROSSCOMPILING)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-            "${CMAKE_CURRENT_SOURCE_DIR}/PresentTests-Linux.cpp")
-
-    file(STRINGS PresentTests-Linux.cpp present_test_lines
-            REGEX "\"Present/[^\"]+\"")
-
     set(present_lock_file "${CMAKE_CURRENT_BINARY_DIR}/PresentSerialisation.cmake")
-    file(WRITE "${present_lock_file}" "")
 
-    foreach (line IN LISTS present_test_lines)
-        string(REGEX MATCH "Present/[^\"]+" present_test "${line}")
-
-        file(APPEND "${present_lock_file}"
-                "set_tests_properties(\"${present_test}\" PROPERTIES\n"
-                "        RESOURCE_LOCK eacp-linux-display)\n")
-    endforeach ()
+    file(WRITE "${present_lock_file}"
+            "set_tests_properties(Present PROPERTIES\n"
+            "        RESOURCE_LOCK eacp-linux-display)\n")
 
     set_property(DIRECTORY APPEND PROPERTY
             TEST_INCLUDE_FILES "${present_lock_file}")

@@ -182,12 +182,8 @@ struct View::Native
         ownerView->resizeFinished();
     }
 
-    void focus() { focused = true; }
-    bool hasFocus() const { return focused; }
-
     View* ownerView;
     Rect bounds;
-    bool focused = false;
 };
 
 View::View()
@@ -303,22 +299,33 @@ Point View::getMousePosition() const
 }
 
 // Applied at once, so a shape set from a mouseMoved handler takes effect now.
-void View::setMouseCursor(MouseCursor cursor)
+void View::setMouseCursor(const MouseCursor& cursor)
 {
     currentCursor = cursor;
 
     linuxRefreshCursor();
 }
 
+View& View::setAcceptsFileDrops(bool value)
+{
+    properties.acceptsFileDrops = value;
+    return *this;
+}
+
+bool View::startFileDrag(const Vector<std::string>&, const FileDragOptions&)
+{
+    return false;
+}
+
 void View::focus()
 {
-    impl->focus();
+    takeKeyFocus();
     linuxViewFocused(properties.wantsTextInput);
 }
 
 bool View::hasFocus() const
 {
-    return impl->hasFocus();
+    return holdsKeyFocus();
 }
 
 void notifyBackingScaleChanged(View& view)

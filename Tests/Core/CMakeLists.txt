@@ -2,22 +2,41 @@ set(core_test_sources
         AllocationCount.cpp
         AppAffordanceTests.cpp
         AppTests.cpp
+        ArgsTests.cpp
         AsyncCoroutineTests.cpp
         AsyncTests.cpp
         Base64Tests.cpp
         # Touches the real system clipboard, and restores whatever was there.
         ClipboardTests.cpp
+        # Runs ConsoleHarness as a child: runConsole's exit codes and streams.
+        ConsoleTests.cpp
         DynamicLibraryTests.cpp
         EventLoopTests.cpp
+        FileLocationsTests.cpp
+        FilePathNamesTests.cpp
         FilePathTests.cpp
         FileTests.cpp
+        FileWatcherTests.cpp
+        FileWriterTests.cpp
+        FilesAppendTests.cpp
+        FilesCopyMoveTests.cpp
+        # Only the paths refused before anything is launched, and the targets
+        # computed for the launch; nothing here starts a file manager.
+        FilesOpenTests.cpp
         FilesTests.cpp
+        FilesWildcardTests.cpp
+        FormatTests.cpp
         MathsTests.cpp
         MemoryMappedFileTests.cpp
         PluginObjectTests.cpp
         ProcessInheritStdioTests.cpp
+        ProcessTokeniseTests.cpp
         RangeTests.cpp
+        ReloadableLibraryTests.cpp
+        SourceWatcherTests.cpp
         StringsTests.cpp
+        TemporaryFileTests.cpp
+        ThreadTests.cpp
         TimerTests.cpp
         ZipTests.cpp)
 
@@ -33,7 +52,14 @@ endif ()
 # ProcessTests drive real POSIX commands (/bin/echo, /bin/cat, ...), so they
 # only run on macOS and Linux.
 if (NOT WIN32)
-    list(APPEND core_test_sources ProcessTests.cpp)
+    list(APPEND core_test_sources
+            BuildRunnerTests.cpp HotReloadLoopTests.cpp ProcessTests.cpp)
+endif ()
+
+# The same options (verbatim commandLine, merged stderr, live output, working
+# directory) through cmd.exe.
+if (WIN32)
+    list(APPEND core_test_sources ProcessTests-Windows.cpp)
 endif ()
 
 # The file/folder picker seam is Windows-only (App-Windows-FilePicker.h), and
@@ -42,6 +68,12 @@ if (WIN32)
     list(APPEND core_test_sources
             FilePathTests-Windows.cpp
             FilePickerWindowsTests.cpp)
+endif ()
+
+# A hosted copy under a foreign host's own Win32 pump: attach, detach, attach
+# again. The message-only window and its class are Windows' hosted machinery.
+if (WIN32)
+    list(APPEND core_test_sources HostedLoopTests-Windows.cpp)
 endif ()
 
 # Permission bits, symlinks and FIFOs — the file behaviour Windows has no form
@@ -64,6 +96,12 @@ if (LINUX)
             EventLoopSourceTests-Linux.cpp
             HostedLoopTests-Linux.cpp
             RootLoopTests-Linux.cpp)
+endif ()
+
+# $HOME and the XDG user-dirs file are how FilePath-Linux.cpp finds the
+# per-user folders.
+if (LINUX)
+    list(APPEND core_test_sources FileLocationsTests-Linux.cpp)
 endif ()
 
 nano_add_executable(CoreTests
@@ -100,6 +138,15 @@ target_compile_definitions(CoreTests PRIVATE
         EACP_STDIO_LINGER_HARNESS="$<TARGET_FILE:StdioLingerHarness>")
 add_dependencies(CoreTests StdioLingerHarness)
 
+# A command-line tool over Apps::runConsole and Args::Parser, which
+# ConsoleTests runs to read the exit code and both streams it leaves.
+add_executable(ConsoleHarness ConsoleHarness.cpp)
+target_link_libraries(ConsoleHarness PRIVATE eacp-core)
+
+target_compile_definitions(CoreTests PRIVATE
+        EACP_CONSOLE_HARNESS="$<TARGET_FILE:ConsoleHarness>")
+add_dependencies(CoreTests ConsoleHarness)
+
 # The image a standalone executable reports for itself cannot be checked from
 # inside the test binary: it depends on the path the launcher used, so the
 # fixture is a second executable the cases start three different ways.
@@ -121,6 +168,19 @@ target_compile_definitions(CoreTests PRIVATE
         EACP_TEST_PLUGIN="$<TARGET_FILE:DynamicLibraryTestPlugin>")
 add_dependencies(CoreTests DynamicLibraryTestPlugin)
 
+# Builds of one module for ReloadableLibraryTests and HotReloadLoopTests,
+# linking no eacp library: a bare module needs only PluginExport.h, so it takes
+# eacp-core's include directory and nothing else. C lacks the answer function.
+foreach (fixture A B C)
+    eacp_add_plugin(ReloadFixture${fixture} ReloadFixture${fixture}.cpp)
+    target_include_directories(ReloadFixture${fixture} PRIVATE
+            $<TARGET_PROPERTY:eacp-core,INTERFACE_INCLUDE_DIRECTORIES>)
+
+    target_compile_definitions(CoreTests PRIVATE
+            EACP_RELOAD_FIXTURE_${fixture}="$<TARGET_FILE:ReloadFixture${fixture}>")
+    add_dependencies(CoreTests ReloadFixture${fixture})
+endforeach ()
+
 # The thin-eacp-host bridge: a plugin whose own copy defers work, so the
 # tests can watch this binary's root loop pump it (RootLoopTests-Linux.cpp).
 if (LINUX)
@@ -132,35 +192,17 @@ if (LINUX)
     add_dependencies(CoreTests RootLoopTestPlugin)
 endif ()
 
-# The system clipboard is a single global object shared with the whole machine,
-# and NanoTest gives every case its own process, so these cannot overlap: under
-# ctest -j one case's copyText lands between another's copyText and getText, and
-# the reader sees the wrong string. A RESOURCE_LOCK serialises them against each
-# other while the rest of the suite still runs in parallel. The names are read
-# out of the source so a new case is covered without editing a list here.
-#
+# The system clipboard is one object shared with the whole machine, so the
+# Clipboard group takes a lock that every other group copying to it takes too.
 # The file is appended to TEST_INCLUDE_FILES after the one nano_discover_tests
-# registers, so the tests exist by the time these run. A name that is not
-# there — the placeholder entry written before the first build — is ignored
-# rather than an error, so only the cross-compiling case, which registers a
-# single target-level test instead, needs a guard.
+# registers, so the group's entry exists by the time it runs.
 if (NOT CMAKE_CROSSCOMPILING)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-            "${CMAKE_CURRENT_SOURCE_DIR}/ClipboardTests.cpp")
-
-    file(STRINGS ClipboardTests.cpp clipboard_test_lines
-            REGEX "\"Clipboard/[^\"]+\"")
-
     set(clipboard_lock_file
             "${CMAKE_CURRENT_BINARY_DIR}/ClipboardSerialisation.cmake")
-    file(WRITE "${clipboard_lock_file}" "")
 
-    foreach (line IN LISTS clipboard_test_lines)
-        string(REGEX MATCH "Clipboard/[^\"]+" clipboard_test "${line}")
-        file(APPEND "${clipboard_lock_file}"
-                "set_tests_properties(\"${clipboard_test}\" PROPERTIES\n"
-                "        RESOURCE_LOCK eacp-system-clipboard)\n")
-    endforeach ()
+    file(WRITE "${clipboard_lock_file}"
+            "set_tests_properties(Clipboard PROPERTIES\n"
+            "        RESOURCE_LOCK eacp-system-clipboard)\n")
 
     set_property(DIRECTORY APPEND PROPERTY
             TEST_INCLUDE_FILES "${clipboard_lock_file}")

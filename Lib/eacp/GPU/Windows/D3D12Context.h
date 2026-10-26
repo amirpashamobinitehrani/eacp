@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -71,13 +72,7 @@ struct CommandContext
     // Ready to be filled from the start again. Only sound once the recording's
     // fence has passed, which is the same condition that lets the allocator be
     // reset -- the GPU has read everything these chunks carried.
-    void rewindUploads()
-    {
-        for (auto& chunk: uploads)
-            chunk.used = 0;
-
-        uploadCursor = 0;
-    }
+    void rewindUploads();
 
     winrt::com_ptr<ID3D12CommandAllocator> allocator;
     winrt::com_ptr<ID3D12GraphicsCommandList> list;
@@ -151,6 +146,14 @@ struct DriverQuirks
     // the device. A region read copies the whole subresource and crops on the
     // CPU instead; see Texture::read.
     bool noBoxedTextureCopy = false;
+
+    // A sampler descriptor table resolves to descriptor 0 of the bound heap
+    // whatever its offset (the Windows-on-Arm bug in SAMPLERS.md). The root
+    // signatures then declare a fixed static sampler at each per-bind sampler
+    // register instead of a table, and Device::supportsPerBindSamplers is false.
+    // Found by adapter rather than by trial, unlike the two above; see
+    // detectsSamplerTableBug.
+    bool samplerTablesIgnoreOffset = false;
 };
 
 // The process-wide half. Created on first use by getD3D12Shared().
@@ -189,6 +192,13 @@ public:
 
     const DepthResolveShader& getDepthResolveShader(bool withStencil);
 
+    // The box-filter kernels Frame::generateMipmaps dispatches, one level from
+    // the one above it through two UAVs of one resource: kind 0 a 2D texture
+    // (RWTexture2D), 1 any arrayed kind, cubes included (RWTexture2DArray, a
+    // dispatch layer per slice), 2 a volume (RWTexture3D). Against the shared
+    // compute root signature, at texture slots 0 and 1; built on first use.
+    ID3D12PipelineState* getMipShader(int kind);
+
     ID3D12RootSignature* getRenderRootSignature() const
     {
         return renderRootSignature.get();
@@ -205,6 +215,10 @@ public:
     // it depends on nothing but the device — which is also why it lives here
     // rather than per context, beside the root signatures it is built like.
     ID3D12CommandSignature* getDispatchSignature();
+
+    // The draw siblings, one per argument type and record stride, since a
+    // signature fixes its ByteStride. Null root signature for the same reason.
+    ID3D12CommandSignature* getDrawSignature(bool indexed, UINT stride);
 
     // Bumped every time the device is rebuilt. A context whose own copy is
     // behind this is holding a queue, heaps and pools that belong to a device
@@ -230,7 +244,10 @@ private:
     winrt::com_ptr<ID3D12RootSignature> renderRootSignature;
     winrt::com_ptr<ID3D12RootSignature> computeRootSignature;
     winrt::com_ptr<ID3D12CommandSignature> dispatchSignature;
+    std::map<std::pair<bool, UINT>, winrt::com_ptr<ID3D12CommandSignature>>
+        drawSignatures;
     DepthResolveShader depthResolveShaders[2];
+    winrt::com_ptr<ID3D12PipelineState> mipShaders[3];
 
     std::uint64_t generation = 1;
 };
@@ -270,6 +287,11 @@ public:
     ID3D12CommandSignature* getDispatchSignature()
     {
         return getD3D12Shared().getDispatchSignature();
+    }
+
+    ID3D12CommandSignature* getDrawSignature(bool indexed, UINT stride)
+    {
+        return getD3D12Shared().getDrawSignature(indexed, stride);
     }
 
     ID3D12DescriptorHeap* getTextureHeap() const

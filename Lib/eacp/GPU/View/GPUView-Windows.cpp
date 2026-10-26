@@ -10,7 +10,6 @@
 #include <eacp/Graphics/Image/Image.h>
 
 #include <algorithm>
-#include <cstdio>
 #include <cmath>
 #include <unordered_set>
 
@@ -134,6 +133,7 @@ struct GPUView::Native : DeviceResourceHolder
         if (device != nullptr)
             updateSize();
 
+        view.deviceRestored();
         view.onDeviceRestored();
         view.repaint();
     }
@@ -466,10 +466,18 @@ struct GPUView::Native : DeviceResourceHolder
 
     void render()
     {
+        render([this](Frame& frame) { view.render(frame); });
+    }
+
+    // Not re-entrant on one view: a frame nested in this view's own would wait
+    // on the back buffer it is still drawing.
+    bool render(const std::function<void(Frame&)>& draw)
+    {
         auto& context = getD3D12Context(Device::shared());
 
-        if (!swapChain || !context.isValid() || width == 0 || height == 0)
-            return;
+        if (rendering || !swapChain || !context.isValid() || width == 0
+            || height == 0)
+            return false;
 
         // Blocks until the swapchain is ready for another frame, so the CPU
         // runs no further ahead of the display than it was told it may.
@@ -479,7 +487,7 @@ struct GPUView::Native : DeviceResourceHolder
         auto index = swapChain->GetCurrentBackBufferIndex();
 
         if (index >= bufferCount || backBuffers[index] == nullptr)
-            return;
+            return false;
 
         // Block until the GPU released this buffer's previous frame, keeping
         // at most one frame in flight per buffer.
@@ -510,17 +518,22 @@ struct GPUView::Native : DeviceResourceHolder
             depth.stencil = stencilEnabled;
         }
 
+        rendering = true;
+
         {
             auto frame = Frame(Device::shared(),
                                &drawable,
                                useMsaa ? &msaa : nullptr,
                                useDepth ? &depth : nullptr,
                                dpiScale());
-            view.render(frame);
+            draw(frame);
         }
+
+        rendering = false;
 
         frameFences[index] = context.lastSubmitted();
         checkDeviceRemoved();
+        return true;
     }
 
     void checkDeviceRemoved()
@@ -546,11 +559,8 @@ struct GPUView::Native : DeviceResourceHolder
         {
             reported = true;
 
-            char code[16] = {};
-            std::snprintf(
-                code, sizeof(code), "0x%08lX", static_cast<unsigned long>(reason));
-
-            LOG("GPUView: the D3D12 device was removed, reason ", code);
+            LOGF("GPUView: the D3D12 device was removed, reason 0x{:08X}",
+                 static_cast<unsigned long>(reason));
         }
 
         // Recovery rebuilds this view's swapchain, so run it from a fresh
@@ -594,6 +604,11 @@ struct GPUView::Native : DeviceResourceHolder
     HANDLE frameLatencyWaitable = nullptr;
 
     bool continuous = false;
+
+    // Recorded for hasReadableDrawable: a back buffer is a copy source as it
+    // is, so nothing on this backend changes with it.
+    bool readableDrawable = false;
+    bool rendering = false;
     bool transparent = false;
     bool depthEnabled = false;
     bool stencilEnabled = false;
@@ -691,6 +706,16 @@ bool GPUView::isContinuous() const
     return impl->continuous;
 }
 
+void GPUView::setReadableDrawable(bool readable)
+{
+    impl->readableDrawable = readable;
+}
+
+bool GPUView::hasReadableDrawable() const
+{
+    return impl->readableDrawable;
+}
+
 void GPUView::setTransparent(bool shouldBeTransparent)
 {
     if (impl->transparent == shouldBeTransparent)
@@ -764,6 +789,11 @@ void GPUView::paint(Graphics::Context& context)
 void GPUView::renderNow()
 {
     impl->render();
+}
+
+bool GPUView::renderFrame(const std::function<void(Frame&)>& draw)
+{
+    return impl->render(draw);
 }
 
 namespace

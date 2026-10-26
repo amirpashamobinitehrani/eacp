@@ -3,9 +3,12 @@
 
 #include "Frame.h"
 
+#include "../CommandBuffer/CopyPlan.h"
 #include "../Device/Device.h"
+#include "../Timing/PassSamples-Apple.h"
 
 #include <eacp/Core/ObjC/ObjC.h>
+#include <eacp/Core/Utils/Logging.h>
 
 namespace eacp::GPU
 {
@@ -18,6 +21,59 @@ namespace
 bool hasStencilPlane(MTLPixelFormat format)
 {
     return format == MTLPixelFormatDepth32Float_Stencil8;
+}
+
+// Where an attachment points inside its texture. One image is the
+// attachment's own level, slice and depthPlane; a run of layers is a 2D array
+// view of them, so the vertex shader's layer index counts from the run's first
+// slice on every backend - Metal's own slice would be ignored by a layered
+// pass, which addresses the whole texture from 0.
+struct AttachmentImage
+{
+    id<MTLTexture> texture = nil;
+    NSUInteger level = 0;
+    NSUInteger slice = 0;
+    NSUInteger depthPlane = 0;
+};
+
+AttachmentImage attachmentImage(id<MTLTexture> texture,
+                                int level,
+                                int slice,
+                                int layerCount)
+{
+    auto image = AttachmentImage {texture};
+
+    if (texture == nil)
+        return image;
+
+    if (layerCount > 1 && texture.textureType != MTLTextureType3D)
+    {
+        image.texture = [texture
+            newTextureViewWithPixelFormat:texture.pixelFormat
+                              textureType:MTLTextureType2DArray
+                                   levels:NSMakeRange((NSUInteger) level, 1)
+                                   slices:NSMakeRange((NSUInteger) slice,
+                                                      (NSUInteger) layerCount)];
+        [image.texture autorelease];
+        return image;
+    }
+
+    image.level = (NSUInteger) level;
+
+    if (texture.textureType == MTLTextureType3D)
+        image.depthPlane = (NSUInteger) slice;
+    else
+        image.slice = (NSUInteger) slice;
+
+    return image;
+}
+
+void point(MTLRenderPassAttachmentDescriptor* attachment, const AttachmentImage& image)
+{
+    attachment.texture = image.texture;
+    attachment.level = image.level;
+    attachment.slice = image.slice;
+    attachment.depthPlane = image.depthPlane;
 }
 
 // Attaches the frame's depth buffer, and its stencil plane when the format has
@@ -41,9 +97,13 @@ bool hasStencilPlane(MTLPixelFormat format)
 void attachDepthStencil(MTLRenderPassDescriptor* passDescriptor,
                         id<MTLTexture> depth,
                         id<MTLTexture> resolved,
+                        float clearDepth,
                         unsigned char clearStencil,
-                        DepthAction action)
+                        DepthAction action,
+                        const ColorTarget& at = {})
 {
+    const auto image = attachmentImage(depth, at.level, at.slice, at.layerCount);
+
     const auto load =
         action == DepthAction::Resume ? MTLLoadActionLoad : MTLLoadActionClear;
 
@@ -54,10 +114,10 @@ void attachDepthStencil(MTLRenderPassDescriptor* passDescriptor,
                                                     : MTLStoreActionStore;
 
     auto depthAttachment = passDescriptor.depthAttachment;
-    depthAttachment.texture = depth;
+    point(depthAttachment, image);
     depthAttachment.loadAction = load;
     depthAttachment.storeAction = store;
-    depthAttachment.clearDepth = 1.0;
+    depthAttachment.clearDepth = (double) clearDepth;
 
     if (resolved != nil)
     {
@@ -79,10 +139,34 @@ void attachDepthStencil(MTLRenderPassDescriptor* passDescriptor,
         return;
 
     auto stencilAttachment = passDescriptor.stencilAttachment;
-    stencilAttachment.texture = depth;
+    point(stencilAttachment, image);
     stencilAttachment.loadAction = load;
     stencilAttachment.storeAction = store;
     stencilAttachment.clearStencil = (uint32_t) clearStencil;
+}
+void attachColor(MTLRenderPassColorAttachmentDescriptor* attachment,
+                 const ColorTarget& target)
+{
+    auto texture = (__bridge id<MTLTexture>) target.texture->nativeTexture();
+
+    if (auto multisample =
+            (__bridge id<MTLTexture>) target.texture->nativeMultisampleTexture())
+    {
+        attachment.texture = multisample;
+        attachment.resolveTexture = texture;
+        attachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+    }
+    else
+    {
+        point(attachment,
+              attachmentImage(texture, target.level, target.slice, target.layerCount));
+        attachment.storeAction = MTLStoreActionStore;
+    }
+
+    attachment.loadAction = target.clear ? MTLLoadActionClear : MTLLoadActionLoad;
+
+    const auto& color = target.clearColor;
+    attachment.clearColor = MTLClearColorMake(color.r, color.g, color.b, color.a);
 }
 } // namespace
 
@@ -133,10 +217,9 @@ struct Frame::Native
 
     // Points a pass descriptor's samples at this frame's slot in the timer.
     //
-    // Only the two outer stage boundaries are sampled: a render pass starts at
-    // the top of its vertex work and ends at the bottom of its fragment work,
-    // and the two in between would say where the middle was rather than how
-    // long the whole took.
+    // All four stage boundaries, not only the outer two: a tile-based GPU runs
+    // a pass's vertex stage while the passes before it are still shading, so
+    // its start and end alone would span their time as well as its own.
     void timeRenderPass(MTLRenderPassDescriptor* passDescriptor,
                         std::string_view label) const
     {
@@ -154,13 +237,24 @@ struct Frame::Native
         if (samples == nil)
             return;
 
-        auto attachment = passDescriptor.sampleBufferAttachments[0];
+        PassSamples::attach(passDescriptor, samples, pass);
+    }
 
-        attachment.sampleBuffer = samples;
-        attachment.startOfVertexSampleIndex = (NSUInteger) (pass * 2);
-        attachment.endOfVertexSampleIndex = MTLCounterDontSample;
-        attachment.startOfFragmentSampleIndex = MTLCounterDontSample;
-        attachment.endOfFragmentSampleIndex = (NSUInteger) (pass * 2 + 1);
+    // Names the set's buffer as the pass's visibility results, which Metal only
+    // takes on the descriptor, and tells the set which command buffer will
+    // write it. Returns the set, or null when the pass counts nothing.
+    OcclusionQueries* countOcclusionInto(MTLRenderPassDescriptor* passDescriptor,
+                                         const RenderPassDescriptor& descriptor) const
+    {
+        auto* queries = Frame::occlusionQueriesFor(descriptor);
+
+        if (queries == nullptr)
+            return nullptr;
+
+        passDescriptor.visibilityResultBuffer =
+            (__bridge id<MTLBuffer>) queries->nativeResults();
+        queries->notePass((__bridge void*) commandBuffer.get());
+        return queries;
     }
 
     // The texture the pass stores into: the drawable's on-screen texture, or the
@@ -186,20 +280,22 @@ Frame::Frame(Device& device,
              void* msaaTexture,
              void* depthTexture,
              float backingScaleToUse)
-    : impl(device, drawable, msaaTexture, depthTexture)
+    : nesting(device, *this)
+    , impl(device, drawable, msaaTexture, depthTexture)
     , scale(backingScaleToUse)
 {
     device.beginFrame();
 }
 
 Frame::Frame(Device& device, const OffscreenTarget& target, float backingScaleToUse)
-    : impl(device, target)
+    : nesting(device, *this)
+    , impl(device, target)
     , scale(backingScaleToUse)
 {
     device.beginFrame();
 }
 
-Graphics::Point Frame::pixelSize() const
+Graphics::Point Frame::nativePixelSize() const
 {
     auto target = impl->storeTexture();
 
@@ -272,7 +368,7 @@ void Frame::flush()
     impl->openCommandBuffer();
 }
 
-RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
+RenderPass Frame::beginNativePass(const RenderPassDescriptor& descriptor)
 {
     auto target = impl->storeTexture();
     auto buffer = impl->commandBuffer.get();
@@ -306,10 +402,12 @@ RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
         attachDepthStencil(passDescriptor,
                            (id<MTLTexture>) depth,
                            nil,
+                           descriptor.clearDepth,
                            descriptor.clearStencil,
                            descriptor.depthAction);
 
     impl->timeRenderPass(passDescriptor, descriptor.label);
+    auto* queries = impl->countOcclusionInto(passDescriptor, descriptor);
 
     auto encoder = [buffer renderCommandEncoderWithDescriptor:passDescriptor];
 
@@ -317,11 +415,12 @@ RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
     // the MSAA texture, when there is one, matches the resolve target's size.
     return RenderPass((__bridge void*) encoder,
                       (int) target.width,
-                      (int) target.height);
+                      (int) target.height,
+                      queries);
 }
 
-// Rendering into an app-owned texture. Depth comes from the target when it was
-// created with one, loaded and stored exactly as the drawable pass does it.
+// Rendering into app-owned textures. Depth comes from the first target when it
+// was created with one, loaded and stored exactly as the drawable pass does it.
 // Passes on one command buffer are ordered by the queue, so nothing here has to
 // say that a later pass may sample what this one wrote.
 //
@@ -334,58 +433,50 @@ RenderPass Frame::beginPass(const RenderPassDescriptor& descriptor)
 // loads the *multisample* texture, which is the attachment, rather than the
 // flattened picture it has been resolving into. See
 // TextureDescriptor::sampleCount.
-RenderPass Frame::beginPass(const Texture& target,
+RenderPass Frame::beginMultiTargetPass(std::span<const ColorTarget> targets,
                             const RenderPassDescriptor& descriptor)
 {
     auto buffer = impl->commandBuffer.get();
-    auto texture = (__bridge id<MTLTexture>) target.nativeTexture();
 
-    if (buffer == nil || texture == nil || !target.isRenderTarget())
+    if (buffer == nil || !canRenderInto(targets, descriptor))
         return RenderPass(nullptr);
 
     auto passDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
-    auto colorAttachment = passDescriptor.colorAttachments[0];
 
-    if (auto multisample =
-            (__bridge id<MTLTexture>) target.nativeMultisampleTexture())
-    {
-        colorAttachment.texture = multisample;
-        colorAttachment.resolveTexture = texture;
-        colorAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
-    }
-    else
-    {
-        colorAttachment.texture = texture;
-        colorAttachment.storeAction = MTLStoreActionStore;
-    }
+    for (auto index = std::size_t {0}; index < targets.size(); ++index)
+        attachColor(passDescriptor.colorAttachments[index], targets[index]);
 
-    colorAttachment.loadAction =
-        descriptor.clear ? MTLLoadActionClear : MTLLoadActionLoad;
+    const auto& first = *targets[0].texture;
+    const auto depthFrom = depthSource(targets, descriptor);
+    const auto& depthOwner = *depthFrom.texture;
 
-    const auto& color = descriptor.clearColor;
-    colorAttachment.clearColor =
-        MTLClearColorMake(color.r, color.g, color.b, color.a);
-
-    if (auto depth = (__bridge id<MTLTexture>) target.nativeDepthTexture())
+    if (auto depth = (__bridge id<MTLTexture>) depthOwner.nativeDepthTexture())
         attachDepthStencil(
             passDescriptor,
             depth,
-            (__bridge id<MTLTexture>) target.nativeResolvedDepthTexture(),
+            (__bridge id<MTLTexture>) depthOwner.nativeResolvedDepthTexture(),
+            descriptor.clearDepth,
             descriptor.clearStencil,
-            descriptor.depthAction);
+            descriptor.depthAction,
+            depthFrom);
+
+    if (targets[0].layerCount > 1)
+        passDescriptor.renderTargetArrayLength = (NSUInteger) targets[0].layerCount;
 
     impl->timeRenderPass(passDescriptor, descriptor.label);
+    auto* queries = impl->countOcclusionInto(passDescriptor, descriptor);
 
     auto encoder = [buffer renderCommandEncoderWithDescriptor:passDescriptor];
 
     return RenderPass((__bridge void*) encoder,
-                      (int) texture.width,
-                      (int) texture.height);
+                      levelWidth(first, targets[0].level),
+                      levelHeight(first, targets[0].level),
+                      queries);
 }
 
-// A compute pass samples at the encoder's own boundaries rather than at a
-// vertex and a fragment stage, which is the same pair of numbers by another
-// name: when the work started and when it finished.
+// A compute pass samples at the encoder's own boundaries, since it has no
+// vertex and fragment stage to split: when the work started and when it
+// finished.
 ComputePass Frame::beginCompute(std::string_view label, DispatchOrder order)
 {
     auto buffer = impl->commandBuffer.get();
@@ -407,13 +498,7 @@ ComputePass Frame::beginCompute(std::string_view label, DispatchOrder order)
         {
             if (auto samples =
                     (__bridge id<MTLCounterSampleBuffer>) timer.nativeSamples())
-            {
-                auto attachment = passDescriptor.sampleBufferAttachments[0];
-
-                attachment.sampleBuffer = samples;
-                attachment.startOfEncoderSampleIndex = (NSUInteger) (pass * 2);
-                attachment.endOfEncoderSampleIndex = (NSUInteger) (pass * 2 + 1);
-            }
+                PassSamples::attach(passDescriptor, samples, pass);
         }
     }
 
@@ -422,8 +507,77 @@ ComputePass Frame::beginCompute(std::string_view label, DispatchOrder order)
                        order);
 }
 
-bool Frame::isValid() const
+TextureFormat Frame::nativeDrawableFormat() const
+{
+    auto target = impl->storeTexture();
+
+    if (target == nil)
+        return TextureFormat::BGRA8Unorm;
+
+    switch (target.pixelFormat)
+    {
+        case MTLPixelFormatRGBA8Unorm:
+            return TextureFormat::RGBA8Unorm;
+        case MTLPixelFormatRGBA8Unorm_sRGB:
+            return TextureFormat::RGBA8UnormSrgb;
+        case MTLPixelFormatBGRA8Unorm_sRGB:
+            return TextureFormat::BGRA8UnormSrgb;
+        case MTLPixelFormatRGBA16Float:
+            return TextureFormat::RGBA16Float;
+        default:
+            return TextureFormat::BGRA8Unorm;
+    }
+}
+
+// A blit on the frame's own command buffer, so it lands after the passes
+// recorded before it and before whatever follows. A drawable's texture is
+// only a blit source when its layer is not framebufferOnly, which is what
+// GPUView::setReadableDrawable turns off; a snapshot's texture always is.
+bool Frame::copyNativeDrawable(const Texture& destination)
+{
+    auto target = impl->storeTexture();
+    auto buffer = impl->commandBuffer.get();
+
+    if (target == nil || buffer == nil || !canCopyDrawableInto(destination))
+        return false;
+
+    if (target.framebufferOnly)
+    {
+        LOG("eacp: copyDrawable on a view whose drawable is not readable; see "
+            "GPUView::setReadableDrawable");
+        return false;
+    }
+
+    auto copyTarget = (__bridge id<MTLTexture>) destination.nativeTexture();
+    auto blit = [(id<MTLCommandBuffer>) buffer blitCommandEncoder];
+
+    [blit copyFromTexture:target
+                 sourceSlice:0
+                 sourceLevel:0
+                sourceOrigin:MTLOriginMake(0, 0, 0)
+                  sourceSize:MTLSizeMake(target.width, target.height, 1)
+                   toTexture:copyTarget
+            destinationSlice:0
+            destinationLevel:0
+           destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+
+    return true;
+}
+
+bool Frame::isNativeValid() const
 {
     return impl->storeTexture() != nil && impl->commandBuffer.get() != nil;
+}
+
+// Metal has no open recording for an upload to go onto: Texture::update and
+// Buffer::update order themselves on the queue.
+void Frame::resumeRecording()
+{
+}
+
+void* Frame::nativeRecording() const
+{
+    return (__bridge void*) impl->commandBuffer.get();
 }
 } // namespace eacp::GPU

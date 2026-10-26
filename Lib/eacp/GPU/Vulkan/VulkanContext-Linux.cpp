@@ -399,6 +399,54 @@ RequiredFeatures probeFeatures(VkPhysicalDevice candidate, std::uint32_t apiVers
                                         : probeExtensionFeatures(candidate);
 }
 
+bool probeDrawIndirectCount(VkPhysicalDevice candidate, bool coreFloor)
+{
+    if (!coreFloor)
+        return hasDeviceExtension(candidate,
+                                  VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+
+    VkPhysicalDeviceVulkan12Features features12 = {};
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+    VkPhysicalDeviceFeatures2 features = {};
+    features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features.pNext = &features12;
+
+    vkGetPhysicalDeviceFeatures2(candidate, &features);
+
+    return features12.drawIndirectCount == VK_TRUE;
+}
+
+// glslang writes gl_Layer from a vertex shader as the ShaderLayer capability
+// at SPIR-V 1.5 and up, which is the core floor's shaderOutputLayer, and as
+// SPV_EXT_shader_viewport_index_layer below it, which is the extension.
+bool probeLayeredRendering(VkPhysicalDevice candidate, bool coreFloor)
+{
+    if (!coreFloor)
+        return hasDeviceExtension(candidate,
+                                  VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+
+    VkPhysicalDeviceVulkan12Features features12 = {};
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+    VkPhysicalDeviceFeatures2 features = {};
+    features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features.pNext = &features12;
+
+    vkGetPhysicalDeviceFeatures2(candidate, &features);
+
+    return features12.shaderOutputLayer == VK_TRUE;
+}
+
+bool aliasDrawIndirectCount()
+{
+    vkCmdDrawIndirectCount = vkCmdDrawIndirectCountKHR;
+    vkCmdDrawIndexedIndirectCount = vkCmdDrawIndexedIndirectCountKHR;
+
+    return vkCmdDrawIndirectCount != nullptr
+           && vkCmdDrawIndexedIndirectCount != nullptr;
+}
+
 // VK_KHR_spirv_1_4 needs VK_KHR_shader_float_controls below 1.2.
 bool offersSpirv14(VkPhysicalDevice candidate)
 {
@@ -524,11 +572,11 @@ bool makePipelineLayouts(VkDevice device,
     return false;
 }
 
-// Decoded from the index, which must agree with samplingIndex's packing.
 VkSampler makeSampler(VkDevice device, int index)
 {
-    const auto linear = (index & 2) != 0;
-    const auto repeat = (index & 1) != 0;
+    const auto sampling = samplingConfiguration(index);
+    const auto linear = sampling.filter == TextureFilter::Linear;
+    const auto repeat = sampling.addressMode == TextureAddressMode::Repeat;
 
     const auto filter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     const auto address = repeat ? VK_SAMPLER_ADDRESS_MODE_REPEAT
@@ -545,6 +593,12 @@ VkSampler makeSampler(VkDevice device, int index)
     info.addressModeW = address;
     info.maxLod = VK_LOD_CLAMP_NONE;
     info.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+
+    if (sampling.compare == TextureCompare::LessEqual)
+    {
+        info.compareEnable = VK_TRUE;
+        info.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    }
 
     auto sampler = VkSampler {VK_NULL_HANDLE};
 
@@ -686,6 +740,47 @@ VulkanTextureBindings spirvTextureBindings(const Vector<std::uint32_t>& words,
     }
 
     return bindings;
+}
+
+void CommandContext::rewindUploads()
+{
+    for (auto& chunk: uploads)
+        chunk.used = 0;
+
+    uploadCursor = 0;
+}
+
+bool VulkanShared::supportsSamplerAnisotropy() const
+{
+    return features.samplerAnisotropy == VK_TRUE;
+}
+
+bool VulkanShared::supportsMultiDrawIndirect() const
+{
+    return features.multiDrawIndirect == VK_TRUE;
+}
+
+bool VulkanShared::supportsIndirectCount() const
+{
+    return indirectCountSupported;
+}
+
+bool VulkanShared::supportsPreciseOcclusionQueries() const
+{
+    return features.occlusionQueryPrecise == VK_TRUE;
+}
+
+bool VulkanShared::supportsLayeredRendering() const
+{
+    return layeredRenderingSupported;
+}
+
+VkSampler VulkanShared::getSampler(const TextureSampling& sampling) const
+{
+    if (device == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
+
+    return samplers[samplingIndex(sampling)];
 }
 
 VulkanShared::VulkanShared()
@@ -941,6 +1036,8 @@ bool VulkanShared::selectPhysicalDevice()
 
     coreFloor = reachesCoreFloor(properties.apiVersion);
     renderPassPath = !coreFloor || forcesRenderPasses();
+    indirectCountSupported = probeDrawIndirectCount(physicalDevice, coreFloor);
+    layeredRenderingSupported = probeLayeredRendering(physicalDevice, coreFloor);
 
     if (coreFloor)
         spirvTarget = Spirv::Target::vulkan13Spirv16;
@@ -980,6 +1077,8 @@ bool VulkanShared::createDevice()
     features12.pNext = &features13;
     features12.timelineSemaphore = VK_TRUE;
     features12.descriptorBindingPartiallyBound = VK_TRUE;
+    features12.drawIndirectCount = indirectCountSupported ? VK_TRUE : VK_FALSE;
+    features12.shaderOutputLayer = layeredRenderingSupported ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceSynchronization2FeaturesKHR synchronization2 = {};
     synchronization2.sType =
@@ -1003,6 +1102,13 @@ bool VulkanShared::createDevice()
     enabled.pNext =
         coreFloor ? static_cast<void*>(&features12) : static_cast<void*>(&indexing);
     enabled.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+    enabled.features.samplerAnisotropy = features.samplerAnisotropy;
+    enabled.features.imageCubeArray = features.imageCubeArray;
+    enabled.features.independentBlend = features.independentBlend;
+    enabled.features.multiDrawIndirect = features.multiDrawIndirect;
+    enabled.features.drawIndirectFirstInstance = features.drawIndirectFirstInstance;
+    enabled.features.occlusionQueryPrecise = features.occlusionQueryPrecise;
+    enabled.features.depthBiasClamp = features.depthBiasClamp;
 
     // Absent rather than fatal; GPUView then stays on the off-screen path.
     auto extensions = Vector<const char*> {};
@@ -1017,6 +1123,12 @@ bool VulkanShared::createDevice()
             extensions.add(VK_KHR_SPIRV_1_4_EXTENSION_NAME);
             extensions.add(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
         }
+
+        if (indirectCountSupported)
+            extensions.add(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+
+        if (layeredRenderingSupported)
+            extensions.add(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
     }
 
     const auto swapchainOffered =
@@ -1053,6 +1165,9 @@ bool VulkanShared::createDevice()
         return false;
     }
 
+    if (!coreFloor && indirectCountSupported)
+        indirectCountSupported = aliasDrawIndirectCount();
+
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
 
     return queue != VK_NULL_HANDLE;
@@ -1076,6 +1191,7 @@ bool VulkanShared::createAllocator()
 }
 
 PipelineLayouts makeComputeLayouts(VkDevice device,
+                                   int bufferSlots,
                                    const VulkanTextureBindings& textures)
 {
     // Laid out exactly as Codegen/ShaderBindings.h prints it. Only the texture
@@ -1087,7 +1203,7 @@ PipelineLayouts makeComputeLayouts(VkDevice device,
     const auto addBinding = [&](int binding, VkDescriptorType type)
     { addLayoutBinding(bindings, binding, type, VK_SHADER_STAGE_COMPUTE_BIT); };
 
-    for (auto slot = 0; slot < maxBufferSlots; ++slot)
+    for (auto slot = 0; slot < bufferSlots; ++slot)
         addBinding(vulkanComputeBufferBinding(slot),
                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 
@@ -1120,7 +1236,7 @@ bool VulkanShared::createRenderLayouts()
 
     addBinding(vulkanUniformBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
 
-    for (auto slot = 0; slot < maxTextureSlots; ++slot)
+    for (auto slot = 0; slot < RenderPass::maxStageTextureSlots; ++slot)
         addBinding(vulkanTextureBinding(slot),
                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 
@@ -1133,7 +1249,8 @@ bool VulkanShared::createRenderLayouts()
 bool VulkanShared::createComputeLayouts()
 {
     // The layout every kernel that declares no texture binds through.
-    computeLayouts = makeComputeLayouts(device, {});
+    computeLayouts =
+        makeComputeLayouts(device, vulkanComputeBufferSlots(properties.limits), {});
 
     return computeLayouts.isValid();
 }
@@ -1997,9 +2114,11 @@ VkDescriptorSet VulkanContext::allocateDescriptorSet(CommandContext& commands,
     // shader. The overcount is headroom, not memory.
     const VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-         vulkanSetsPerDescriptorPool * static_cast<std::uint32_t>(maxBufferSlots)},
+         vulkanSetsPerDescriptorPool
+             * static_cast<std::uint32_t>(maxComputeBufferSlots)},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-         vulkanSetsPerDescriptorPool * static_cast<std::uint32_t>(maxTextureSlots)},
+         vulkanSetsPerDescriptorPool
+             * static_cast<std::uint32_t>(RenderPass::maxStageTextureSlots)},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
          vulkanSetsPerDescriptorPool * static_cast<std::uint32_t>(maxTextureSlots)},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, vulkanSetsPerDescriptorPool}};

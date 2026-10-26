@@ -23,6 +23,8 @@ using namespace eacp::GPU;
 // there cannot be one here: the rule is an assert, and an assert that fires
 // aborts the run rather than failing a test.
 
+namespace MultiDeviceTests
+{
 namespace
 {
 struct ScaleKernel final : ComputeProgram
@@ -245,3 +247,4 @@ auto tOwningThreadIsAnswerable = test("GPU/owningThreadIsAnswerable") = []
     check(!workerOwner.followsMainThread);
     check(!workerOwner.isCurrent());
 };
+} // namespace MultiDeviceTests

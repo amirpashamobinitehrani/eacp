@@ -1,8 +1,5 @@
 include(FetchContent)
 
-find_package(ResEmbed REQUIRED)
-find_package(Miro REQUIRED)
-
 # The page bridge, over a ScriptHost rather than over a WebView: the shim, the
 # wire format, the Miro command table and the EACP_STATE binders. It touches no
 # native web runtime — no WebKit, no WebView2 — so a host that runs scripts
@@ -84,8 +81,7 @@ res_embed_add(eacp-webview
 
 if (APPLE)
     target_sources(eacp-webview PRIVATE
-            WebView/WebView.mm
-            WebView/DevServerProbe-Posix.cpp)
+            WebView/WebView.mm)
     target_link_libraries(eacp-webview PRIVATE
             "-framework Foundation"
             "-framework WebKit")
@@ -106,17 +102,13 @@ if (APPLE)
 elseif (WIN32)
     target_sources(eacp-webview PRIVATE
             WebView/WebView-Windows.cpp
-            WebView/FileDrag-Windows.cpp
-            WebView/DevServerProbe-Windows.cpp)
+            WebView/FileDrag-Windows.cpp)
 
     find_package(WebView2 REQUIRED)
 
     target_link_libraries(eacp-webview PRIVATE
             WebView2::WebView2
-            ws2_32
             shlwapi)
-else ()
-    target_sources(eacp-webview PRIVATE WebView/DevServerProbe-Posix.cpp)
 endif ()
 
 set_default_target_setting(eacp-webview)

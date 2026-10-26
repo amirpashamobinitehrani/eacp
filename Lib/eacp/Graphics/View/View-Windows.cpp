@@ -1,11 +1,15 @@
 #include "View.h"
+#include "FileDragOut-Windows.h"
 #include "../Graphics/GraphicsContext.h"
 #include <eacp/Core/Utils/Strings.h>
 #include "../Image/Image.h"
 #include "../Layers/NativeLayer-Windows.h"
 
 #include <eacp/Core/Threads/Async.h>
+#include <eacp/Core/Threads/EventLoop.h>
 #include <eacp/Core/Utils/Singleton.h>
+
+#include <shlobj.h>
 
 #include <cmath>
 #include <memory>
@@ -16,10 +20,13 @@ namespace eacp::Graphics
 
 // Defined in Window-Windows.cpp: the HWND hosting `view`'s root.
 HWND findHostHwndForView(View* view);
+void refreshHostCursor(HWND hwnd);
 
 namespace
 {
 using Microsoft::WRL::ComPtr;
+
+View* fileDragSource = nullptr;
 
 // Immediate-mode 2D drawing for View::paint(Context&) on Windows. macOS backs
 // paint() with a CGContext; here each painting View owns a Direct2D drawing
@@ -511,9 +518,6 @@ struct View::Native
         return local;
     }
 
-    void focus() { hasFocusFlag = true; }
-    bool hasFocus() const { return hasFocusFlag; }
-
     // The DPI scale of the window hosting this view, so paint surfaces stay
     // crisp on a monitor whose scaling differs from the system DPI. Falls back
     // to the system DPI while the view is not yet parented into a window.
@@ -653,7 +657,6 @@ struct View::Native
 
     View* ownerView;
     Rect bounds;
-    bool hasFocusFlag = false;
 
     ComPtr<IDCompositionVisual2> visual;
     ComPtr<IDCompositionVisual3> visual3;
@@ -679,6 +682,9 @@ View::View()
 
 View::~View()
 {
+    if (fileDragSource == this)
+        fileDragSource = nullptr;
+
     for (auto* layer: getLayers())
         layer->detachFromLayer();
 
@@ -726,29 +732,78 @@ Point View::getMousePosition() const
     return impl->getMousePosition();
 }
 
-// Stored but not yet applied. Windows re-asks for the pointer on every
-// WM_SETCURSOR, so a bare SetCursor here would be overwritten by the default on
-// the very next mouse move; doing it properly means handling WM_SETCURSOR in the
-// host window and resolving the view under the pointer there, which is a change
-// to CompositionHostWindow rather than to this file.
-//
-// Left undone deliberately rather than written blind: there is no Windows
-// machine in the loop to see the result on, and a cursor that flickers between
-// two shapes is worse than one that never changes. getMouseCursor() still
-// answers, so everything portable about the feature is testable here.
-void View::setMouseCursor(MouseCursor cursor)
+// Windows asks again on every WM_SETCURSOR, which the host answers from the
+// view under the pointer; this applies a change made between two of them.
+void View::setMouseCursor(const MouseCursor& cursor)
 {
+    if (currentCursor == cursor)
+        return;
+
     currentCursor = cursor;
+    refreshHostCursor(findHostHwndForView(this));
 }
 
+View& View::setAcceptsFileDrops(bool value)
+{
+    properties.acceptsFileDrops = value;
+    return *this;
+}
+
+bool View::startFileDrag(const Vector<std::string>& paths,
+                         const FileDragOptions& options)
+{
+    auto host = findHostHwndForView(this);
+
+    if (paths.empty() || fileDragSource != nullptr || host == nullptr)
+        return false;
+
+    auto oleResult = OleInitialize(nullptr);
+
+    if (FAILED(oleResult))
+        return false;
+
+    auto dataObject = createFileDataObject(paths);
+
+    if (!dataObject)
+    {
+        OleUninitialize();
+        return false;
+    }
+
+    auto onFinished = options.onFinished;
+    DWORD allowedEffects =
+        options.canMove ? DROPEFFECT_COPY | DROPEFFECT_MOVE : DROPEFFECT_COPY;
+    DWORD effect = DROPEFFECT_NONE;
+
+    fileDragSource = this;
+    auto dragResult =
+        SHDoDragDrop(host, dataObject.Get(), nullptr, allowedEffects, &effect);
+    auto sourceSurvived = fileDragSource == this;
+    fileDragSource = nullptr;
+
+    dataObject.Reset();
+    OleUninitialize();
+
+    if (onFinished && sourceSurvived)
+    {
+        auto result = fileDragResultFor(dragResult, effect);
+        Threads::callAsync([onFinished, result] { onFinished(result); });
+    }
+
+    return true;
+}
+
+// A composition view is a visual, not a window, so there is no HWND for Win32
+// focus to land on. The host window has it, and CompositionHostWindow hands
+// every key to the content view, whose dispatchKeyEvent sends it here.
 void View::focus()
 {
-    impl->focus();
+    takeKeyFocus();
 }
 
 bool View::hasFocus() const
 {
-    return impl->hasFocus();
+    return holdsKeyFocus();
 }
 
 void* View::getNativeLayer()

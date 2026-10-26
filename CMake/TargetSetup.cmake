@@ -8,6 +8,15 @@ set(EACP_MACOS_PLIST "${CMAKE_CURRENT_LIST_DIR}/macOSBundleInfo.plist.in"
 set(EACP_IOS_PLIST "${CMAKE_CURRENT_LIST_DIR}/iOSBundleInfo.plist.in"
         CACHE INTERNAL "eacp iOS bundle Info.plist template")
 
+# Include-time too: eacp's libraries take INTERPROCEDURAL_OPTIMIZATION_RELEASE,
+# which under Clang makes their archives bitcode that GNU ld reads only on a -flto
+# link. Fat objects let a plain executable link them (ELF only, so Linux).
+if (LINUX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    foreach (lang C CXX)
+        set(CMAKE_${lang}_COMPILE_OPTIONS_IPO "-flto=thin;-ffat-lto-objects")
+    endforeach ()
+endif ()
+
 function(eacp_bundle_plist_template out_var)
     if (IOS)
         set(${out_var} "${EACP_IOS_PLIST}" PARENT_SCOPE)
@@ -110,6 +119,10 @@ function(set_default_warnings_level target)
     # narrowing that is genuinely intended is written as a cast with a comment.
     if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT MSVC)
         target_compile_options(${target} PRIVATE -Wshorten-64-to-32)
+
+        # Set by eacp_add_hot_reload on the app and its module.
+        target_compile_options(${target} PRIVATE
+                $<$<BOOL:$<TARGET_PROPERTY:EACP_HOT_RELOAD_ABI>>:-Wno-return-type-c-linkage>)
     endif ()
 endfunction()
 
@@ -268,8 +281,9 @@ function(eacp_force_optimization target)
         # The cl/clang-cl Debug defaults fight optimization: /RTC1 is a hard
         # error under any /O level (D8016) and /Od warns when overridden by /O2
         # (D9025). Strip both before forcing the level below.
-        # Both languages: a vendored C library (ThirdParty/miniz) is forced
-        # the same way, and cl's C Debug defaults carry the same two flags.
+        # Both languages: the vendored libraries (ThirdParty/miniz, which is C,
+        # and ThirdParty/fmt) are forced the same way, and cl's C Debug
+        # defaults carry the same two flags.
         foreach (lang C CXX)
             string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_${lang}_FLAGS_DEBUG
                     "${CMAKE_${lang}_FLAGS_DEBUG}")
@@ -380,8 +394,6 @@ END
     "version": "@app_version@"
 }
 ]==])
-
-    find_package(ResEmbed REQUIRED)
     res_embed_add(${target}
             FILES     "${app_info_json}"
             NAMESPACE AppInfo

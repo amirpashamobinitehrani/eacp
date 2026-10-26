@@ -2,6 +2,7 @@ add_library(eacp-graphics STATIC)
 
 target_sources(eacp-graphics PRIVATE
         Helpers/DisplayLink.cpp
+        Helpers/FramePacer.cpp
         Image/Image.cpp
         Image/ImageOps.cpp
         Input/GameInput.cpp
@@ -9,6 +10,7 @@ target_sources(eacp-graphics PRIVATE
         Layers/Layer.cpp
         Menu/Menu.cpp
         Menu/MenuCommands.cpp
+        View/MouseCursor.cpp
         Primitives/FontOptions.cpp
         Primitives/Primitives.cpp
         View/View.cpp
@@ -29,7 +31,6 @@ endif ()
 # live in ESIMD, which is always built -O3 -- so ImageOps.cpp holds only thin
 # wrappers and needs no per-source optimization flag here. (The old per-config
 # per-source -O2 also broke the Xcode generator, which the iOS build uses.)
-find_package(ESIMD REQUIRED)
 target_link_libraries(eacp-graphics PUBLIC eacp-core ESIMD)
 
 # PUBLIC so the capability is a compile-time fact for every consumer, not just
@@ -70,6 +71,7 @@ if (APPLE)
                 Tray/TrayIcon-iOS.mm
                 View/View-iOS.mm
                 Window/Display-iOS.mm
+                Window/EmbeddedView-iOS.mm
                 Window/Window-iOS.mm)
         target_link_libraries(eacp-graphics PRIVATE
                 "-framework UIKit"
@@ -83,6 +85,7 @@ if (APPLE)
                 Menu/AppKitMenu.mm
                 Menu/Menu-macOS.mm
                 Tray/TrayIcon-macOS.mm
+                View/FileDragOut-macOS.mm
                 View/View-macOS.mm
                 Window/Display-macOS.mm
                 Window/EmbeddedView-macOS.mm
@@ -115,6 +118,7 @@ elseif (WIN32)
             Primitives/Path-Windows.cpp
             Primitives/TextMetrics-Windows.cpp
             Tray/TrayIcon-Windows.cpp
+            View/FileDragOut-Windows.cpp
             View/View-Windows.cpp
             Window/CompositionHostWindow-Windows.cpp
             Window/Display-Windows.cpp

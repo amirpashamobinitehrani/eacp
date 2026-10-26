@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 
 // VulkanShared is one per process, VulkanContext one per GPU::Device. Nothing
@@ -93,13 +94,7 @@ struct CommandContext
     };
 
     // Only sound once the recording's completion value has passed.
-    void rewindUploads()
-    {
-        for (auto& chunk: uploads)
-            chunk.used = 0;
-
-        uploadCursor = 0;
-    }
+    void rewindUploads();
 
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer buffer = VK_NULL_HANDLE;
@@ -149,9 +144,10 @@ struct VulkanRenderPassKey
 {
     bool operator==(const VulkanRenderPassKey& other) const = default;
 
-    VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+    int colorCount = 1;
+    std::array<VkFormat, maxColorAttachments> colorFormats {};
+    std::array<VkAttachmentLoadOp, maxColorAttachments> colorLoads {};
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
-    VkAttachmentLoadOp colorLoad = VK_ATTACHMENT_LOAD_OP_LOAD;
     VkAttachmentStoreOp colorStore = VK_ATTACHMENT_STORE_OP_STORE;
     bool colorResolve = false;
 
@@ -174,7 +170,8 @@ public:
                                  VkRenderPass renderPass,
                                  const Vector<VkImageView>& views,
                                  std::uint32_t width,
-                                 std::uint32_t height);
+                                 std::uint32_t height,
+                                 std::uint32_t layers = 1);
 
     void forgetView(VkDevice device, VkImageView view);
 
@@ -193,6 +190,7 @@ private:
         Vector<VkImageView> views;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
+        std::uint32_t layers = 1;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
     };
 
@@ -240,7 +238,7 @@ public:
 
     VulkanRenderPassCache& getRenderPasses() { return renderPasses; }
 
-    VkRenderPass compatibleRenderPass(VkFormat colorFormat,
+    VkRenderPass compatibleRenderPass(std::span<const VkFormat> colorFormats,
                                       int samples,
                                       VkFormat depthFormat,
                                       bool stencil);
@@ -271,14 +269,27 @@ public:
     // Serialises vkQueueSubmit; the queue is shared by every Device.
     std::mutex& getQueueMutex() { return queueMutex; }
 
-    // Null before the device came up.
-    VkSampler getSampler(const TextureSampling& sampling) const
-    {
-        if (device == VK_NULL_HANDLE)
-            return VK_NULL_HANDLE;
+    // Enabled at device creation wherever the device offers it.
+    bool supportsSamplerAnisotropy() const;
 
-        return samplers[samplingIndex(sampling)];
-    }
+    // Several records per vkCmdDrawIndirect, and a non-zero firstInstance in a
+    // record; each enabled wherever the device offers it.
+    bool supportsMultiDrawIndirect() const;
+
+    // vkCmdDrawIndirectCount: the Vulkan 1.2 feature on the core floor, the
+    // VK_KHR_draw_indirect_count extension below it.
+    bool supportsIndirectCount() const;
+
+    // An occlusion query that counts samples exactly, VK_QUERY_CONTROL_PRECISE_BIT;
+    // enabled wherever the device offers it.
+    bool supportsPreciseOcclusionQueries() const;
+
+    // gl_Layer from a vertex shader: shaderOutputLayer on the core floor,
+    // VK_EXT_shader_viewport_index_layer below it.
+    bool supportsLayeredRendering() const;
+
+    // Null before the device came up.
+    VkSampler getSampler(const TextureSampling& sampling) const;
 
 private:
     void createAll();
@@ -313,6 +324,8 @@ private:
     Spirv::Target spirvTarget = Spirv::Target::vulkan13Spirv16;
     VulkanRenderPassCache renderPasses;
     bool depthResolvesBySampleZero = false;
+    bool indirectCountSupported = false;
+    bool layeredRenderingSupported = false;
 
     VkPipelineCache pipelineCache = VK_NULL_HANDLE;
 
@@ -362,6 +375,7 @@ public:
     }
 
     void setRenderPassOpen(bool open) { renderPassOpen = open; }
+    bool isRenderPassOpen() const { return renderPassOpen; }
 
     // An image no upload wrote is in UNDEFINED, which nothing may be bound at,
     // so it needs one barrier into its resting layout. Recording it here rather
@@ -412,6 +426,15 @@ public:
     void deferRelease(Callback destroy);
 
     void deferReleaseBuffer(VkBuffer buffer, VmaAllocation allocation);
+
+    // A host-visible, coherent buffer mapped for its whole life; cached where
+    // it is read back. Released with deferReleaseBuffer.
+    bool makeHostBuffer(std::size_t bytes,
+                        VkBufferUsageFlags usage,
+                        bool readBack,
+                        VkBuffer& buffer,
+                        VmaAllocation& allocation,
+                        std::byte*& mapped);
 
     // Follows the main thread rather than the one that constructed this.
     void followMainThread() { mainThreadOwned = true; }
@@ -472,13 +495,6 @@ private:
 
     ConstantPage* pageFor(CommandContext& commands, std::size_t bytes);
 
-    // Mapped for its whole life.
-    bool makeHostBuffer(std::size_t bytes,
-                        VkBufferUsageFlags usage,
-                        bool readBack,
-                        VkBuffer& buffer,
-                        VmaAllocation& allocation,
-                        std::byte*& mapped);
 
     VkBuffer acquirePooled(Vector<PooledBuffer>& pool,
                            Vector<int>& taken,

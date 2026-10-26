@@ -15,25 +15,11 @@ using namespace eacp;
 using namespace eacp::GPU;
 using namespace eacp::GPU::CrossChecks;
 
+namespace UIntBufferVectorTests
+{
 namespace
 {
 constexpr auto uintBytes = (int) sizeof(std::uint32_t);
-
-bool contains(const std::string& text, const char* needle)
-{
-    return text.find(needle) != std::string::npos;
-}
-
-int occurrences(const std::string& text, const std::string& needle)
-{
-    auto found = 0;
-
-    for (auto at = text.find(needle); at != std::string::npos;
-         at = text.find(needle, at + needle.size()))
-        ++found;
-
-    return found;
-}
 
 // Values a float cannot hold: past the mantissa, and up against 2^32.
 std::uint32_t sourceValue(int element)
@@ -324,24 +310,7 @@ auto tQuadsKeepEveryBit = test("UIntBufferVector/quadsKeepBitsAFloatLoses") = []
                                    == ((quad[lane] >> 16) | (rotated[lane] << 16)),
                                name);
 
-                         // Asked of the bits rather than by round-tripping
-                         // through a float, which is the same question and not
-                         // the same code: MSVC at /O2 folds
-                         // `(std::uint32_t) (float) x != x` to false, naming the
-                         // two conversions does not stop it, and the count this
-                         // guards then reads zero on a run where every value
-                         // does lose bits - turning the guard off exactly when
-                         // it would have fired.
-                         //
-                         // A float holds a uint32 exactly when its significant
-                         // bits fit the 24-bit mantissa, so shift the trailing
-                         // zeros off and see what is left.
-                         auto significant = quad[lane];
-
-                         while (significant != 0u && (significant & 1u) == 0u)
-                             significant >>= 1;
-
-                         if (significant >= (1u << 24))
+                         if (quad[lane] > (1u << 24))
                              ++beyondAFloat;
                      }
                  }
@@ -432,3 +401,4 @@ auto tRecordsReadThroughARangeStartAtItsOffset =
                  }
              });
 };
+} // namespace UIntBufferVectorTests

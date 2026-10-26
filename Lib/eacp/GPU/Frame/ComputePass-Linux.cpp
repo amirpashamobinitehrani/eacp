@@ -2,6 +2,7 @@
 
 #include "../Buffer/Buffer.h"
 #include "../Pipeline/ComputePipeline.h"
+#include "../Texture/Sampler.h"
 #include "../Vulkan/VulkanTypes.h"
 
 #include <memory>
@@ -21,6 +22,66 @@ struct ComputePass::Native
     bool isConcurrent() const { return order == DispatchOrder::Concurrent; }
 
     VkCommandBuffer commandBuffer() const { return encoder->commands->buffer; }
+
+    // level < 0 is every level, the texture's own sampled view.
+    void bindInputTexture(const Texture& texture,
+                          int slot,
+                          VkSampler sampler,
+                          int level = -1,
+                          bool asArray = false)
+    {
+        if (!encoder || slot < 0 || slot >= maxTextureSlots
+            || sampler == VK_NULL_HANDLE)
+            return;
+
+        auto* data = static_cast<VulkanTextureData*>(texture.nativeTexture());
+
+        if (data == nullptr || !data->isValid())
+            return;
+
+        const auto view = asArray     ? vulkanSampledArrayView(*data, level)
+                          : level < 0 ? data->sampledView
+                                      : vulkanLevelView(*data, false, level);
+
+        if (view == VK_NULL_HANDLE)
+            return;
+
+        // A computeWrite texture rests in GENERAL, which a sampled read is legal
+        // in, so a kernel reading one level and writing another needs no second
+        // layout.
+        const auto& target = data->restingUse();
+        transitionTextureForUse(commandBuffer(), *data, target);
+
+        textures[slot] = {sampler, view, target.layout};
+        sampledTextures |= 1u << slot;
+        storageTextures &= ~(1u << slot);
+    }
+
+    // The whole plane at slice -1, one slice's 2D view otherwise.
+    void bindDepthTexture(const Texture& renderTarget,
+                          int slot,
+                          VkSampler sampler,
+                          int slice = -1)
+    {
+        if (!encoder || slot < 0 || slot >= maxTextureSlots
+            || sampler == VK_NULL_HANDLE)
+            return;
+
+        auto* data = static_cast<VulkanTextureData*>(renderTarget.nativeTexture());
+
+        if (data == nullptr || !data->hasSampleableDepth())
+            return;
+
+        const auto view =
+            slice < 0 ? data->depthReadView : vulkanDepthSliceView(*data, slice);
+
+        if (view == VK_NULL_HANDLE)
+            return;
+
+        textures[slot] = {sampler, view, imageDepthSampled.layout};
+        sampledTextures |= 1u << slot;
+        storageTextures &= ~(1u << slot);
+    }
 
     void orderAfterDispatch(VkCommandBuffer buffer) const
     {
@@ -46,10 +107,11 @@ struct ComputePass::Native
         if (set == VK_NULL_HANDLE)
             return false;
 
-        VkWriteDescriptorSet writes[maxBufferSlots + maxTextureSlots + 1] = {};
+        VkWriteDescriptorSet writes[maxComputeBufferSlots + maxTextureSlots + 1] =
+            {};
         auto writeCount = std::uint32_t {0};
 
-        for (auto slot = 0; slot < maxBufferSlots; ++slot)
+        for (auto slot = 0; slot < maxComputeBufferSlots; ++slot)
         {
             if ((boundBuffers & (1u << slot)) == 0)
                 continue;
@@ -134,7 +196,7 @@ struct ComputePass::Native
 
     const VulkanComputePipeline* pipeline = nullptr;
 
-    VkDescriptorBufferInfo buffers[maxBufferSlots] = {};
+    VkDescriptorBufferInfo buffers[maxComputeBufferSlots] = {};
     std::uint32_t boundBuffers = 0;
 
     VkDescriptorImageInfo textures[maxTextureSlots] = {};
@@ -154,7 +216,7 @@ ComputePass::~ComputePass()
     end();
 }
 
-void ComputePass::setPipeline(const ComputePipeline& pipeline)
+void ComputePass::encodePipeline(const ComputePipeline& pipeline)
 {
     boundGroup = pipeline.threadGroupShape();
     boundPipeline = false;
@@ -180,7 +242,7 @@ void ComputePass::setInputBuffer(const Buffer& buffer, int slot)
 
 void ComputePass::setInputBuffer(const BufferRange& range, int slot)
 {
-    if (!impl->encoder || slot < 0 || slot >= maxBufferSlots
+    if (!impl->encoder || slot < 0 || slot >= vulkanComputeBufferSlots()
         || range.buffer == nullptr)
         return;
 
@@ -203,7 +265,7 @@ void ComputePass::setOutputBuffer(const Buffer& buffer, int slot)
 
 void ComputePass::setOutputBuffer(const BufferRange& range, int slot)
 {
-    if (!impl->encoder || slot < 0 || slot >= maxBufferSlots
+    if (!impl->encoder || slot < 0 || slot >= vulkanComputeBufferSlots()
         || range.buffer == nullptr)
         return;
 
@@ -223,25 +285,14 @@ void ComputePass::setInputTexture(const Texture& texture,
                                   int slot,
                                   TextureSampling sampling)
 {
-    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
-        return;
+    impl->bindInputTexture(texture, slot, getVulkanShared().getSampler(sampling));
+}
 
-    auto* data = static_cast<VulkanTextureData*>(texture.nativeTexture());
-
-    if (data == nullptr || !data->isValid())
-        return;
-
-    const auto sampler = getVulkanShared().getSampler(sampling);
-
-    if (sampler == VK_NULL_HANDLE)
-        return;
-
-    const auto& target = data->restingUse();
-    transitionTextureForUse(impl->commandBuffer(), *data, target);
-
-    impl->textures[slot] = {sampler, data->sampledView, target.layout};
-    impl->sampledTextures |= 1u << slot;
-    impl->storageTextures &= ~(1u << slot);
+void ComputePass::setInputTexture(const Texture& texture,
+                                  int slot,
+                                  const Sampler& sampler)
+{
+    impl->bindInputTexture(texture, slot, toVkSampler(sampler));
 }
 
 void ComputePass::setOutputTexture(const Texture& texture, int slot)
@@ -261,6 +312,104 @@ void ComputePass::setOutputTexture(const Texture& texture, int slot)
     impl->sampledTextures &= ~(1u << slot);
 }
 
+void ComputePass::setInputTextureLevel(const Texture& texture,
+                                       int slot,
+                                       int level,
+                                       TextureSampling sampling)
+{
+    if (level < 0)
+        return;
+
+    impl->bindInputTexture(
+        texture, slot, getVulkanShared().getSampler(sampling), level);
+}
+
+void ComputePass::setOutputTextureLevel(const Texture& texture, int slot, int level)
+{
+    if (!impl->encoder || slot < 0 || slot >= maxTextureSlots)
+        return;
+
+    auto* data = static_cast<VulkanTextureData*>(texture.nativeTexture());
+
+    if (data == nullptr || !data->isValid() || !data->isComputeWritable())
+        return;
+
+    const auto view = vulkanLevelView(*data, true, level);
+
+    if (view == VK_NULL_HANDLE)
+        return;
+
+    transitionTextureForUse(impl->commandBuffer(), *data, imageStorage);
+
+    impl->textures[slot] = {VK_NULL_HANDLE, view, imageStorage.layout};
+    impl->storageTextures |= 1u << slot;
+    impl->sampledTextures &= ~(1u << slot);
+}
+
+void ComputePass::setInputTextureAsArray(const Texture& texture,
+                                         int slot,
+                                         int level,
+                                         TextureSampling sampling)
+{
+    if (texture.kind() == TextureType::TwoDArray)
+    {
+        setInputTextureLevel(texture, slot, level, sampling);
+        return;
+    }
+
+    if (level < 0)
+        return;
+
+    impl->bindInputTexture(
+        texture, slot, getVulkanShared().getSampler(sampling), level, true);
+}
+
+// A cube's storage view is a 2D array of its slices already.
+void ComputePass::setOutputTextureAsArray(const Texture& texture,
+                                          int slot,
+                                          int level)
+{
+    const auto kind = texture.kind();
+
+    if (kind == TextureType::TwoDArray || kind == TextureType::Cube
+        || kind == TextureType::CubeArray)
+        setOutputTextureLevel(texture, slot, level);
+}
+
+// The read view the render pass's depth binds use, level 0 of every layer as
+// the kind's view type, in the layout the pass that drew it left it in.
+void ComputePass::setInputDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       TextureSampling sampling)
+{
+    impl->bindDepthTexture(
+        renderTarget, slot, getVulkanShared().getSampler(sampling));
+}
+
+void ComputePass::setInputDepthTexture(const Texture& renderTarget,
+                                       int slot,
+                                       const Sampler& sampler)
+{
+    impl->bindDepthTexture(renderTarget, slot, toVkSampler(sampler));
+}
+
+void ComputePass::setInputDepthTextureSlice(const Texture& renderTarget,
+                                            int slice,
+                                            int slot,
+                                            TextureSampling sampling)
+{
+    impl->bindDepthTexture(
+        renderTarget, slot, getVulkanShared().getSampler(sampling), slice);
+}
+
+void ComputePass::setInputDepthTextureSlice(const Texture& renderTarget,
+                                            int slice,
+                                            int slot,
+                                            const Sampler& sampler)
+{
+    impl->bindDepthTexture(renderTarget, slot, toVkSampler(sampler), slice);
+}
+
 void ComputePass::setBytes(const void* data, std::int64_t bytes, int slot)
 {
     if (!impl->encoder || bytes <= 0 || slot < 0 || slot >= maxUniformSlots)
@@ -271,7 +420,7 @@ void ComputePass::setBytes(const void* data, std::int64_t bytes, int slot)
         commands.context->uploadConstants(commands, data, (std::size_t) bytes);
 }
 
-void ComputePass::dispatch(int count)
+void ComputePass::encodeDispatch(int count)
 {
     if (!impl->canRecord() || !boundPipeline || count <= 0)
         return;
@@ -287,7 +436,7 @@ void ComputePass::dispatch(int count)
     impl->orderAfterDispatch(commandBuffer);
 }
 
-void ComputePass::dispatch(int width, int height)
+void ComputePass::encodeDispatch(int width, int height)
 {
     if (!impl->canRecord() || !boundPipeline || width <= 0 || height <= 0)
         return;
@@ -306,7 +455,7 @@ void ComputePass::dispatch(int width, int height)
     impl->orderAfterDispatch(commandBuffer);
 }
 
-void ComputePass::dispatch(int width, int height, int depth)
+void ComputePass::encodeDispatch(int width, int height, int depth)
 {
     if (!impl->canRecord() || !boundPipeline || width <= 0 || height <= 0
         || depth <= 0)
@@ -328,8 +477,8 @@ void ComputePass::dispatch(int width, int height, int depth)
     impl->orderAfterDispatch(commandBuffer);
 }
 
-void ComputePass::dispatchIndirect(const Buffer& arguments,
-                                   std::int64_t offsetInBytes)
+void ComputePass::encodeDispatchIndirect(const Buffer& arguments,
+                                         std::int64_t offsetInBytes)
 {
     if (!impl->canRecord() || !boundPipeline || offsetInBytes < 0
         || offsetInBytes % 4 != 0
@@ -359,7 +508,7 @@ void ComputePass::dispatchIndirect(const Buffer& arguments,
     impl->orderAfterDispatch(commandBuffer);
 }
 
-void ComputePass::barrier()
+void ComputePass::encodeBarrier()
 {
     if (impl->isConcurrent())
         impl->recordBarrier();

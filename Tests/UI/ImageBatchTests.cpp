@@ -1,4 +1,4 @@
-#include <eacp/UI/UI.h>
+#include "Common.h"
 
 #include <NanoTest/NanoTest.h>
 
@@ -19,16 +19,6 @@ using namespace eacp::UI;
 
 namespace
 {
-// The ramps own a texture and the glyph atlas owns two, so a painter needs a
-// device -- but no window, no pass and no drawable.
-bool hasDevice()
-{
-    return GPU::Device::shared().isValid();
-}
-
-const auto red = Color {1.f, 0.f, 0.f, 1.f};
-const auto blue = Color {0.f, 0.f, 1.f, 1.f};
-
 // A solid image of one colour, `size` on a side.
 eacp::Graphics::Image solid(int size, const Color& colour)
 {
@@ -41,21 +31,7 @@ eacp::Graphics::Image solid(int size, const Color& colour)
     return image;
 }
 
-// A painter with nowhere to draw, which is all a recording needs.
-struct Recorder
-{
-    explicit Recorder(const Rect& bounds = {0.f, 0.f, 100.f, 50.f})
-        : g(list, ramps, text, bounds)
-    {
-    }
-
-    DrawList list;
-    GradientRamps ramps;
-    Text::TextRenderer text;
-    UI::Graphics g;
-};
-
-bool isNear(float a, float b, float tolerance = 1e-4f)
+bool isNearlyEqual(float a, float b, float tolerance = 1e-4f)
 {
     return std::abs(a - b) <= tolerance;
 }
@@ -80,10 +56,11 @@ struct Rendered
 };
 
 // Within what eight bits and a linear filter allow.
-bool isColour(const Color& actual, const Color& expected)
+bool isImageColour(const Color& actual, const Color& expected)
 {
-    return isNear(actual.r, expected.r, 0.02f) && isNear(actual.g, expected.g, 0.02f)
-           && isNear(actual.b, expected.b, 0.02f);
+    return isNearlyEqual(actual.r, expected.r, 0.02f)
+           && isNearlyEqual(actual.g, expected.g, 0.02f)
+           && isNearlyEqual(actual.b, expected.b, 0.02f);
 }
 
 // The left half red, the right half blue at half strength, out of two images
@@ -176,6 +153,99 @@ auto tReleaseKeepsWhatIsHeld =
     check(cache.size() == 0, "and now nobody does");
 };
 
+// The pixels are hashed once per buffer, not once per ask. Shown by changing
+// the bytes behind the image's back -- something no caller may do, and the one
+// way to tell a lookup that reads no pixels from one that reads them all: the
+// old content key would hash the new bytes and upload a second texture.
+auto tHitReadsNoPixels =
+    test("ImageCache/askingAgainForAnUnchangedImageReadsNoPixels") = []
+{
+    if (!hasDevice())
+        return;
+
+    auto cache = ImageCache {};
+    auto image = solid(4, red);
+
+    auto first = cache.get(image);
+
+    auto* bytes = const_cast<std::uint8_t*>(image.pixels().data());
+    bytes[0] = 0;
+
+    auto second = cache.get(image);
+
+    check(first != nullptr);
+    check(second == first, "found by the buffer, not by hashing it again");
+    check(cache.size() == 1, "and nothing uploaded");
+};
+
+// A write through prepareForOverwrite keeps the buffer -- it is unshared and
+// the size matches -- so the identity alone would find the old texture. The
+// write count is what says these are other pixels.
+auto tOverwriteInvalidates =
+    test("ImageCache/anImageOverwrittenInPlaceIsUploadedAgain") = []
+{
+    if (!hasDevice())
+        return;
+
+    auto cache = ImageCache {};
+    auto image = solid(4, red);
+
+    auto first = cache.get(image);
+    const auto* before = image.pixels().data();
+
+    auto* out = image.prepareForOverwrite(4, 4);
+
+    for (auto i = 0; i < 4 * 4; ++i)
+    {
+        out[i * 4 + 0] = 0;
+        out[i * 4 + 1] = 0;
+        out[i * 4 + 2] = 255;
+        out[i * 4 + 3] = 255;
+    }
+
+    check(out == before, "the same buffer, written in place");
+
+    auto second = cache.get(image);
+
+    check(second != nullptr);
+    check(second != first, "the new pixels, not the texture of the old ones");
+    check(second == cache.get(solid(4, blue)), "and found by their content");
+
+    // And the same through set(), which writes in place too.
+    image.set(0, 0, red);
+
+    auto third = cache.get(image);
+
+    check(third != second);
+};
+
+// A copy shares the buffer, so it is the same entry -- found by identity,
+// without hashing the copy.
+auto tCopySharesEntry = test("ImageCache/aCopyOfAnImageIsTheSameTexture") = []
+{
+    if (!hasDevice())
+        return;
+
+    auto cache = ImageCache {};
+    auto image = solid(4, red);
+
+    auto first = cache.get(image);
+    auto copy = image;
+
+    check(cache.get(copy) == first);
+    check(cache.size() == 1);
+
+    // Until the copy is written, which detaches it and leaves the original's
+    // texture where it was.
+    copy.set(0, 0, blue);
+
+    auto detached = cache.get(copy);
+
+    check(detached != first);
+    check(cache.get(image) == first);
+    check(cache.size() == 2);
+};
+
 auto tImageRecordsInOwnPoints = test("DrawList/anImageIsRecordedInItsOwnPoints") = []
 {
     if (!hasDevice())
@@ -214,10 +284,10 @@ auto tSourceRectIsUV =
 
     const auto& uv = recorder.list.getImages()[0].uv;
 
-    check(isNear(uv.x, 0.25f));
-    check(isNear(uv.y, 0.5f));
-    check(isNear(uv.w, 0.5f));
-    check(isNear(uv.h, 0.25f));
+    check(isNearlyEqual(uv.x, 0.25f));
+    check(isNearlyEqual(uv.y, 0.5f));
+    check(isNearlyEqual(uv.w, 0.5f));
+    check(isNearlyEqual(uv.h, 0.25f));
 };
 
 auto tNothingIsRecordedForNothing =
@@ -297,8 +367,9 @@ auto tFrameDrawsImages = test("ImageBatch/aFrameDrawsWhatTheTreeRecorded") = []
 
     // The x axis carries the assertion: neither backend mirrors horizontally,
     // so nothing here assumes which way up the read-back arrives.
-    check(isColour(rendered.at(10.f, 20.f), red), "the left half is the red image");
-    check(isColour(rendered.at(30.f, 20.f), {0.5f, 0.5f, 1.f, 1.f}),
+    check(isImageColour(rendered.at(10.f, 20.f), red),
+          "the left half is the red image");
+    check(isImageColour(rendered.at(30.f, 20.f), {0.5f, 0.5f, 1.f, 1.f}),
           "the right half is half blue over the white background");
 
     check(scene.host.getCachedImageCount() == 2);
@@ -376,8 +447,73 @@ auto tImageIsCutByClip = test("ImageBatch/anImageIsCutByTheClip") = []
 
     auto rendered = Rendered {host};
 
-    check(isColour(rendered.at(10.f, 20.f), red));
-    check(isColour(rendered.at(30.f, 20.f), Color::white()), "cut by the clip");
+    check(isImageColour(rendered.at(10.f, 20.f), red));
+    check(isImageColour(rendered.at(30.f, 20.f), Color::white()), "cut by the clip");
+};
+
+auto tRadiiFitTheRect = test("RoundedRect/radiiPastTheRectShrinkTogether") = []
+{
+    auto uniform = fittedRadii({{0.f, 0.f, 40.f, 20.f}, CornerRadii::all(30.f)});
+
+    check(isNearlyEqual(uniform.topLeft, 10.f), "half the shorter side");
+    check(isNearlyEqual(uniform.bottomRight, 10.f));
+
+    auto uneven = fittedRadii({{0.f, 0.f, 40.f, 40.f}, {30.f, 50.f, 0.f, 10.f}});
+
+    check(isNearlyEqual(uneven.topLeft, 15.f), "the top asks for twice its length");
+    check(isNearlyEqual(uneven.topRight, 25.f));
+    check(isNearlyEqual(uneven.bottomLeft, 5.f));
+
+    auto kept = fittedRadii({{0.f, 0.f, 40.f, 40.f}, {4.f, 0.f, 8.f, 2.f}});
+
+    check(isNearlyEqual(kept.topLeft, 4.f) && isNearlyEqual(kept.bottomRight, 8.f),
+          "radii that fit are left alone");
+};
+
+auto tImageIsCutByCorners = test("ImageBatch/anImageIsCutByItsCorners") = []
+{
+    if (!hasDevice())
+        return;
+
+    struct Rounded final : Component
+    {
+        void paint(UI::Graphics& g) override
+        {
+            auto image = getHost()->getImageCache().get(solid(2, red));
+            auto bounds = getLocalBounds();
+            auto box = RoundedRect {bounds, {16.f, 16.f, 16.f, 0.f}};
+            auto source = Rect {0.f, 0.f, 2.f, 2.f};
+
+            for (auto i = 0; i < 4; ++i)
+                g.drawImage(image,
+                            source,
+                            {(float) i * 10.f, 0.f, 10.f, bounds.h},
+                            box);
+        }
+    };
+
+    auto host = ComponentHost {};
+    auto rounded = Rounded {};
+
+    host.setBackgroundColour(Color::white());
+    host.setRootComponent(rounded);
+    host.setBounds({0.f, 0.f, 40.f, 40.f});
+    host.resized();
+
+    auto rendered = Rendered {host};
+
+    check(isImageColour(rendered.at(20.f, 20.f), red));
+    check(isImageColour(rendered.at(1.f, 1.f), Color::white()),
+          "the top-left corner is cut by the box, not by its tile");
+    check(isImageColour(rendered.at(38.5f, 1.f), Color::white()));
+    check(isImageColour(rendered.at(38.5f, 38.5f), Color::white()));
+    check(isImageColour(rendered.at(1.f, 38.5f), red), "a square corner stays");
+    check(isImageColour(rendered.at(5.f, 20.f), red), "the edge between corners");
+    check(host.getLastImageDrawCount() == 1, "four tiles, one box, one draw");
+
+    auto edge = rendered.at(16.f - 16.f / std::sqrt(2.f), 16.f - 16.f / std::sqrt(2.f));
+
+    check(edge.g > 0.05f && edge.g < 0.95f, "anti-aliased on the curve");
 };
 
 auto tUnusedTextureGoes =
@@ -397,4 +533,213 @@ auto tUnusedTextureGoes =
 
     check(scene.host.getCachedImageCount() == 0,
           "the recording was cleared and painted without them");
+};
+
+namespace
+{
+eacp::Graphics::Image pattern(int size)
+{
+    auto image = eacp::Graphics::Image {size, size};
+
+    for (auto y = 0; y < size; ++y)
+        for (auto x = 0; x < size; ++x)
+            image.set(x,
+                      y,
+                      Color {(float) x / (float) size,
+                             (float) y / (float) size,
+                             (float) ((x * 7 + y * 3) % 16) / 15.f,
+                             1.f});
+
+    return image;
+}
+
+ImageRef uploadedOnTheCpu(const eacp::Graphics::Image& image)
+{
+    auto descriptor = GPU::TextureDescriptor {};
+    descriptor.width = image.width();
+    descriptor.height = image.height();
+    descriptor.format = GPU::TextureFormat::RGBA8Unorm;
+    descriptor.mipmapped = true;
+
+    return std::make_shared<ImageTexture>(descriptor, image.pixels().data(), 0);
+}
+
+struct Shown final : Component
+{
+    void paint(UI::Graphics& g) override { g.drawImage(image, area); }
+
+    ImageRef image;
+    Rect area;
+};
+
+eacp::Graphics::Image drawThrough(ComponentHost& host,
+                                  Shown& shown,
+                                  const ImageRef& image,
+                                  float drawnPixels,
+                                  float scale)
+{
+    shown.image = image;
+    shown.area = {0.f, 0.f, drawnPixels / scale, drawnPixels / scale};
+    shown.repaint();
+
+    return host.renderToImage(scale);
+}
+
+int largestDifference(const eacp::Graphics::Image& a, const eacp::Graphics::Image& b)
+{
+    auto largest = 0;
+
+    for (auto y = 0; y < a.height(); ++y)
+    {
+        for (auto x = 0; x < a.width(); ++x)
+        {
+            auto p = a.at(x, y);
+            auto q = b.at(x, y);
+
+            for (auto difference: {p.r - q.r, p.g - q.g, p.b - q.b, p.a - q.a})
+                largest = std::max(largest,
+                                   (int) std::lround(std::abs(difference) * 255.f));
+        }
+    }
+
+    return largest;
+}
+} // namespace
+
+auto tDeviceChainDrawsLikeCpu =
+    test("ImageCache/aPictureDrawsTheSameWhicheverSideBuiltItsChain") = []
+{
+    if (!hasDevice())
+        return;
+
+    auto source = pattern(64);
+    auto shown = Shown {};
+    auto host = ComponentHost {};
+
+    host.setBackgroundColour(Color::white());
+    host.setRootComponent(shown);
+    host.setBounds({0.f, 0.f, 64.f, 64.f});
+    host.resized();
+
+    auto cached = host.getImageCache().get(source);
+    auto reference = uploadedOnTheCpu(source);
+
+    check(cached->texture.mipLevels() == reference->texture.mipLevels());
+
+    for (auto scale: {1.f, 2.f})
+    {
+        auto label = " at " + std::to_string((int) scale) + "x";
+
+        auto full = drawThrough(host, shown, reference, 64.f, scale);
+        auto fullCached = drawThrough(host, shown, cached, 64.f, scale);
+
+        check(largestDifference(full, fullCached) == 0, "level 0" + label);
+
+        auto small = drawThrough(host, shown, reference, 13.f, scale);
+        auto smallCached = drawThrough(host, shown, cached, 13.f, scale);
+
+        check(largestDifference(small, smallCached) <= 1,
+              "minified, " + std::to_string(largestDifference(small, smallCached))
+                  + " apart" + label);
+    }
+};
+
+namespace
+{
+struct Cut final : Component
+{
+    void paint(UI::Graphics& g) override
+    {
+        auto image = getHost()->getImageCache().get(solid(2, red));
+
+        g.drawImage(image, {0.f, 0.f, 2.f, 2.f}, area, corners);
+    }
+
+    Rect area;
+    RoundedRect corners;
+};
+
+eacp::Graphics::Image drawCut(ComponentHost& host,
+                              Cut& cut,
+                              const RoundedRect& corners,
+                              float scale)
+{
+    cut.corners = corners;
+    cut.repaint();
+
+    return host.renderToImage(scale);
+}
+} // namespace
+
+// An uncut quad is cut by a square just past its edges, which has to read one
+// at every pixel the quad touches. Multisampled, a pixel a sample of the quad
+// covers shades at a centre outside it - at half a point per device pixel, an
+// edge at 5.7 or 14.3 device pixels - so the edges are compared against the
+// same quad cut by a square nowhere near it, which costs no alpha anywhere.
+auto tUncutEdgesKeepTheirAlpha =
+    test("ImageBatch/anUncutImageDrawsItsEdgesAsAFarCutDoes") = []
+{
+    if (!hasDevice() || !GPU::Device::shared().supportsSampleCount(4))
+        return;
+
+    auto cut = Cut {};
+    auto host = ComponentHost {};
+
+    cut.area = {11.4f, 11.4f, 17.2f, 17.2f};
+
+    host.setSampleCount(4);
+    host.setBackgroundColour(Color::white());
+    host.setRootComponent(cut);
+    host.setBounds({0.f, 0.f, 40.f, 40.f});
+    host.resized();
+
+    auto far = RoundedRect {{-20.f, -20.f, 80.f, 80.f}, CornerRadii::all(1.f)};
+
+    for (auto scale: {0.5f, 1.f, 2.f})
+    {
+        auto uncut = drawCut(host, cut, {}, scale);
+        auto reference = drawCut(host, cut, far, scale);
+
+        check(largestDifference(uncut, reference) == 0,
+              "at " + std::to_string(scale) + "x, "
+                  + std::to_string(largestDifference(uncut, reference)) + " apart");
+    }
+};
+
+// A rect with no radius is no cut, whether it is recorded or handed to the
+// batch: a square cut is what the clip is for.
+auto tZeroRadiiAreNoCut = test("ImageBatch/aRectWithNoRadiusDoesNotCut") = []
+{
+    if (!hasDevice())
+        return;
+
+    auto square = RoundedRect {{10.f, 10.f, 20.f, 20.f}};
+
+    check(!square.isRounded());
+    check(RoundedRect {square.rect, {0.f, 0.f, 2.f, 0.f}}.isRounded());
+    check(!RoundedRect {{}, CornerRadii::all(4.f)}.isRounded(), "nor an empty one");
+
+    auto cache = ImageCache {};
+    auto image = cache.get(solid(2, red));
+    auto recorder = Recorder {};
+
+    recorder.g.drawImage(image, {0.f, 0.f, 2.f, 2.f}, {0.f, 0.f, 40.f, 40.f}, square);
+
+    check(recorder.list.getImages()[0].corners.isEmpty(), "recorded uncut");
+
+    auto cut = Cut {};
+    auto host = ComponentHost {};
+
+    cut.area = {0.f, 0.f, 40.f, 40.f};
+    cut.corners = square;
+
+    host.setBackgroundColour(Color::white());
+    host.setRootComponent(cut);
+    host.setBounds({0.f, 0.f, 40.f, 40.f});
+    host.resized();
+
+    auto rendered = Rendered {host};
+
+    check(isImageColour(rendered.at(20.f, 20.f), red));
+    check(isImageColour(rendered.at(5.f, 5.f), red), "drawn past the square");
 };

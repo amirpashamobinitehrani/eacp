@@ -99,7 +99,7 @@ RUN printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
     'cd /workspace' \
-    'cmake -G Ninja -B build-ci-linux -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_SCAN_FOR_MODULES=OFF -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ "$@"' \
+    'cmake -G Ninja -B build-ci-linux -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_SCAN_FOR_MODULES=OFF -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ "$@"' \
     'cmake --build build-ci-linux' \
     'ctest --test-dir build-ci-linux --output-on-failure' \
     > /usr/local/bin/ci-build \
@@ -112,7 +112,7 @@ RUN printf '%s\n' \
 #
 #   docker run --rm -v "$PWD":/workspace eacp-ci-linux \
 #       with-weston ctest --test-dir build-ci-linux --output-on-failure \
-#       -E '^(X11|EmbeddedView)/'
+#       -E '^(X11|EmbeddedView)(/|$)'
 #
 # The two X11 suites are filtered out: each prefers X11 by its own default and
 # there is no X server in a Weston session, so under EACP_REQUIRE_DISPLAY=1
@@ -131,7 +131,7 @@ COPY Scripts/with-weston /usr/local/bin/with-weston
 #
 #   docker run --rm -v "$PWD":/workspace eacp-ci-linux \
 #       with-xvfb ctest --test-dir build-ci-linux --output-on-failure \
-#       -R '^(X11|EmbeddedView|Present)/'
+#       -R '^(X11|EmbeddedView|Present)(/|$)'
 COPY Scripts/with-xvfb /usr/local/bin/with-xvfb
 
 WORKDIR /workspace

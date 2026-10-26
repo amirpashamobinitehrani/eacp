@@ -3,8 +3,14 @@
 #include "../Graphics/GraphicsContext.h"
 #include "../Layers/Layer.h"
 #include "../Graphics/Keyboard.h"
+#include "MouseCursor.h"
+#include "FileDrag.h"
+#include "Magnify.h"
+
+#include <eacp/Core/Platform/Platform.h>
 
 #include <functional>
+#include <string>
 
 namespace eacp::Threads
 {
@@ -26,7 +32,8 @@ enum class MouseEventType
     Moved,
     Entered,
     Exited,
-    Wheel
+    Wheel,
+    Magnify
 };
 
 enum class MouseButton
@@ -37,32 +44,16 @@ enum class MouseButton
     Other = 3
 };
 
-// The shape the pointer takes over a view.
-//
-// Deliberately a small set of the shapes every platform names the same way. An
-// app wanting something else is asking for a custom image, which is a different
-// feature with a different lifetime problem — and none of these needs it: the
-// point of a cursor shape is that it is a convention the person already knows.
-enum class MouseCursor
+// Whether a press asks for a context menu: the right button anywhere, and on
+// macOS also a Control-click with the left, which is how a one-button mouse or
+// a trackpad without secondary click asks. juce::ModifierKeys::isPopupMenu.
+constexpr bool isPopupMenuClick(MouseButton button, const ModifierKeys& modifiers)
 {
-    // The arrow. What a view has until it says otherwise.
-    Default,
+    if (button == MouseButton::Right)
+        return true;
 
-    // Over text that can be selected.
-    IBeam,
-
-    // Over something clickable that is not a control — a link.
-    PointingHand,
-
-    // Over a vertical splitter, so a draggable divider reads as draggable
-    // before anyone tries dragging it. This is the one an IDE cannot do without.
-    ResizeLeftRight,
-
-    // Over a horizontal splitter.
-    ResizeUpDown,
-
-    Crosshair
-};
+    return Platform::isMac() && button == MouseButton::Left && modifiers.control;
+}
 
 // Where a wheel event sits in a scroll gesture. A notched wheel has no gesture
 // to speak of and always reports None; a trackpad runs Began -> Changed -> Ended
@@ -128,14 +119,22 @@ struct MouseEvent
     // preference, so this is intent, not raw device motion — do not invert it.
     bool preciseScrolling = false;
 
-    // Wheel events only. See ScrollPhase.
+    // Wheel and magnify events. See ScrollPhase; a magnify gesture runs
+    // Began -> Changed -> Ended and never reports Momentum.
     ScrollPhase scrollPhase = ScrollPhase::None;
+
+    // Magnify events only: how much this step of the pinch zooms, as a factor
+    // to multiply the current zoom by. 1 is no change, above 1 zooms in.
+    float magnifyScale = 1.0f;
 
     // A finger rather than a pointer: a touch the view did not take as touches
     // and was handed as the left button instead. What lets a scrolling list
     // follow a finger dragged across it while a mouse dragged the same way
     // still selects.
     bool fromTouch = false;
+
+    // See isPopupMenuClick.
+    bool isPopupMenu() const { return isPopupMenuClick(button, modifiers); }
 };
 
 enum class TouchPhase
@@ -173,6 +172,13 @@ struct ViewProperties
     // the platform has one (Android). Focusing a view without it puts that
     // keyboard away, so a tap on a button does not raise it.
     bool wantsTextInput = false;
+
+    // Whether files dragged from the OS can be dropped here. See fileDragEnter.
+    bool acceptsFileDrops = false;
+
+    // Whether the pointer passes through this view and its subviews to whatever
+    // is beneath them. See View::setIgnoresMouseEvents.
+    bool ignoresMouseEvents = false;
 };
 
 class View
@@ -262,6 +268,12 @@ public:
     // x horizontal): lines for a notched wheel, points for a trackpad, and
     // event.preciseScrolling says which.
     virtual void mouseWheel(const MouseEvent&);
+
+    // Trackpad pinch, delivered like the wheel to the view under the pointer.
+    // event.magnifyScale is the step's zoom factor, event.scrollPhase where the
+    // gesture is. macOS and Windows; nothing calls it on Linux or iOS.
+    virtual void mouseMagnify(const MouseEvent&);
+
     // Only for views that set handlesTouchEvents; a finger stays with the view it
     // came down on. Other views get the first finger as mouse events.
     virtual void touchBegan(const TouchEvent&);
@@ -274,6 +286,18 @@ public:
     // passKeyOn(); one that does not override them keeps none.
     virtual void keyDown(const KeyEvent&);
     virtual void keyUp(const KeyEvent&);
+
+    // Files dragged in from the OS (Finder, Explorer, a DAW's browser), for a
+    // view that called setAcceptsFileDrops(). Paths are UTF-8, positions in
+    // this view's points. Enter and move answer whether the view would take
+    // the files there, which is what decides the copy or the refusal cursor.
+    // A drag that is dropped is not exited first; one that leaves is.
+    // macOS and Windows; nothing calls them on Linux or iOS.
+    virtual bool fileDragEnter(const Vector<std::string>& files, Point position);
+    virtual bool fileDragMove(const Vector<std::string>& files, Point position);
+    virtual void fileDragExit();
+    virtual void filesDropped(const Vector<std::string>& files, Point position);
+
     virtual void resized();
 
     //Internal helpers to deal with scaling
@@ -337,8 +361,28 @@ public:
     View& setHandlesTouchEvents(bool value = true);
     View& setGrabsFocusOnMouseDown(bool value = true);
 
+    // Takes this view and its subviews out of pointer routing altogether, as if
+    // they were not there: hitTest answers null for them, so a click, a hover
+    // or a wheel lands on the view beneath, and on macOS and iOS the native
+    // view answers no hit test either, so the platform hands the click, the
+    // cursor and first-responder status to that view rather than to this one.
+    //
+    // What an overlay that only draws wants -- a GPUView placed over a
+    // ComponentHost to render a scene the host's own tree takes the input for.
+    // Without it AppKit makes the overlay first responder on a click, and the
+    // keys the host was handling go to a view that ignores them. Off by default.
+    View& setIgnoresMouseEvents(bool value = true);
+
     // Applied at once when this view already has focus.
     View& setWantsTextInput(bool value = true);
+
+    // Registers this view with the OS as a place files can be dropped. Off by
+    // default: a view that registers and then refuses a drag shows the refusal
+    // cursor rather than letting whatever is behind it take the files.
+    View& setAcceptsFileDrops(bool value = true);
+
+    bool startFileDrag(const Vector<std::string>& paths,
+                       const FileDragOptions& options = {});
 
     Point getMousePosition() const;
 
@@ -352,17 +396,21 @@ public:
     //
     // Setting the same shape twice is free, so a handler can call this on every
     // move without checking first.
-    void setMouseCursor(MouseCursor cursor);
-    constexpr MouseCursor getMouseCursor() const { return currentCursor; }
+    void setMouseCursor(const MouseCursor& cursor);
+    const MouseCursor& getMouseCursor() const { return currentCursor; }
 
     virtual View* hitTest(const Point& point);
 
     void dispatchMouseEvent(const MouseEvent& event);
 
-    // What the platform layer calls with a key event for this view: reports it
-    // to the window's input tap (WindowEvents::input), then calls keyDown or
-    // keyUp. Returns whether the view kept the key: one it passed on is the
-    // platform's to act on, as Android's Back leaves the activity.
+    // What the platform layer calls with a key event: reports it to the
+    // window's input tap (WindowEvents::input), then calls keyDown or keyUp on
+    // the view that has key focus — when this is the root of a tree one of
+    // whose views called focus(), else on this view — and on each parent in
+    // turn for as long as the view before it passed the key on, the way a key
+    // walks up an AppKit responder chain. Returns whether any of them kept
+    // the key: one every view passed on is the platform's to act on, as
+    // Android's Back leaves the activity.
     bool dispatchKeyEvent(const KeyEvent& event);
 
     // From inside keyDown or keyUp: the key is not this view's.
@@ -414,9 +462,24 @@ private:
     Window* ownerWindow = nullptr;
 
     void handleMouseEvent(const MouseEvent& event);
+
+    // Calls keyDown or keyUp, and reports whether this view kept the key.
+    bool handleKeyEvent(const KeyEvent& event);
+
+    // Key focus for the platforms with no responder chain to keep it (Windows,
+    // Linux, Android), whose focus() and hasFocus() are these. macOS and iOS
+    // ask the native first responder instead, so nothing there sets it.
+    void takeKeyFocus();
+    bool holdsKeyFocus() const;
+    void forgetKeyFocusIn(View& removed);
+
+    View* getRoot();
+    const View* getRoot() const;
     Point convertPointToDescendant(const Point& point, View* descendant);
     MouseEvent
         createLocalEvent(const MouseEvent& event, View* target, MouseEventType type);
+
+    void clearMouseTargetsIn(View& view);
 
     void forwardDragOrUpToCapturedTarget(const MouseEvent& event);
     void updateHoverTracking(View* target, const MouseEvent& event);
@@ -455,6 +518,12 @@ private:
     View* parent = nullptr;
     View* hoveredView = nullptr;
     View* mouseDownTarget = nullptr;
+
+    // The view keys go to. Kept on the root, as the window's one key focus,
+    // and only ever set there: a root with none takes the keys itself, as a
+    // window's content view does on macOS until something else becomes first
+    // responder.
+    View* keyFocus = nullptr;
     Vector<ActiveTouch> touches;
     Insets safeAreaInsets;
 

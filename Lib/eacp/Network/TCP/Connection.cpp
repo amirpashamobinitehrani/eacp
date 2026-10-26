@@ -61,9 +61,24 @@ void Connection::close()
     impl->socket = detail::invalidSocket;
 }
 
+void Connection::interrupt()
+{
+    if (isOpen())
+        detail::socketShutdown(impl->socket);
+}
+
 const Address& Connection::address() const
 {
     return impl->address;
+}
+
+void Connection::setIoTimeout(Time::MS timeout)
+{
+    if (!isOpen())
+        return;
+
+    impl->timeouts.io = timeout;
+    detail::socketSetIoTimeout(impl->socket, timeout);
 }
 
 void Connection::send(std::string_view bytes)

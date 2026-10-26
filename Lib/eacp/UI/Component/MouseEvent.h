@@ -23,6 +23,18 @@ struct MouseEvent
     // Movement since the previous event, in points.
     Point delta;
 
+    // The same movement as the device reported it, with no acceleration curve:
+    // what a camera orbit or an FPS look follows. In the device's own units
+    // rather than points. See eacp::Graphics::MouseEvent::rawDelta.
+    Point rawDelta;
+
+    // Pen or Force Touch pressure, 0 to 1; 1 where the device has none.
+    float pressure = 1.0f;
+
+    // Wheel and magnify events: where the event sits in its gesture. See
+    // eacp::Graphics::ScrollPhase.
+    eacp::Graphics::ScrollPhase scrollPhase = eacp::Graphics::ScrollPhase::None;
+
     eacp::Graphics::MouseButton button = eacp::Graphics::MouseButton::Left;
     eacp::Graphics::ModifierKeys modifiers;
     int clickCount = 1;
@@ -35,6 +47,10 @@ struct MouseEvent
     Point wheelDelta;
     bool preciseWheel = false;
 
+    // Magnify events only: the pinch step's zoom factor, to multiply the
+    // current zoom by. 1 is no change, above 1 zooms in.
+    float magnifyScale = 1.0f;
+
     // A finger rather than a pointer. A scrolling component follows a finger
     // dragged across it and leaves a mouse drag with the meaning it always had.
     bool fromTouch = false;
@@ -43,5 +59,12 @@ struct MouseEvent
     // difference between two events means anything, which is what a fling's
     // velocity is measured from.
     double timestamp = 0.0;
+
+    // A right-click, or a Control-click on macOS: whether this press asks for a
+    // context menu. See eacp::Graphics::isPopupMenuClick.
+    bool isPopupMenu() const
+    {
+        return eacp::Graphics::isPopupMenuClick(button, modifiers);
+    }
 };
 } // namespace eacp::UI

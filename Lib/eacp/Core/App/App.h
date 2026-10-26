@@ -52,7 +52,9 @@ void restart();
 
 // Hands `url` to the OS for its registered handler (e.g. the default
 // browser for http/https) — e.g. to run an OAuth login outside the
-// in-app WebView. Linux has no backend yet and asserts if called.
+// in-app WebView. Linux spawns xdg-open. For a local file or folder, use
+// Files::openWithSystem, which takes a path rather than a URL and reports
+// whether the launch happened.
 void openExternalURL(const std::string& url);
 
 // Controls whether the app shows a Dock icon and appears in the app
@@ -157,9 +159,13 @@ void observeSystemPowerOff();
 // convention and returns false.
 bool isDistributionSigned();
 
+// `title` and `initialDirectory` are honoured on macOS (the panel's message
+// and starting folder); the Windows dialog ignores them for now.
 struct FilePickerOptions
 {
     Vector<std::string> allowedExtensions;
+    std::string title;
+    std::string initialDirectory;
 };
 
 // Shows the OS's native file chooser, blocking until the user picks a file
@@ -174,6 +180,8 @@ struct FileSaveOptions
 {
     Vector<std::string> allowedExtensions;
     std::string suggestedName;
+    std::string title;
+    std::string initialDirectory;
 };
 
 // Shows the OS's native save panel, blocking until the user names a file or
@@ -189,6 +197,34 @@ std::optional<std::string> chooseSaveFile(const FileSaveOptions& options = {});
 // on cancel. Must be called on the UI thread. Implemented on macOS and
 // Windows; Linux returns std::nullopt for now.
 std::optional<std::string> chooseDirectory();
+
+// The path picked, or std::nullopt on cancel.
+using FileChosenCallback = std::function<void(const std::optional<std::string>&)>;
+
+// The choosers above without the block: each returns at once, and `onChosen`
+// is called later on the UI thread, exactly once. What a plugin wants, since a
+// modal loop inside a host's UI thread is the host's to run, not ours.
+//
+// On macOS the panel runs modelessly (beginWithCompletionHandler), so the app
+// and its host keep running while it is up. Elsewhere the blocking chooser is
+// run from the event loop through Threads::callAsync -- still modal on
+// Windows, and answering std::nullopt wherever the blocking one does (Linux,
+// iOS, Android). Must be called on the UI thread.
+void chooseFileAsync(const FilePickerOptions& options, FileChosenCallback onChosen);
+void chooseSaveFileAsync(const FileSaveOptions& options,
+                         FileChosenCallback onChosen);
+
+// `allowedExtensions` is ignored: it is a folder being picked.
+void chooseDirectoryAsync(const FilePickerOptions& options,
+                          FileChosenCallback onChosen);
+
+namespace Detail
+{
+// The async choosers on a platform with no modeless panel: posts `chooser` to
+// the event loop and hands its answer to `onChosen` there.
+void runChooserLater(std::function<std::optional<std::string>()> chooser,
+                     FileChosenCallback onChosen);
+} // namespace Detail
 
 // True when this copy's app was started by run<T>() from inside a dynamic
 // library — it rides the host executable's loop instead of owning one, and
@@ -258,5 +294,26 @@ int run(int argc, char* argv[])
 // timers fire and nested pumps (runEventLoopFor / runEventLoopUntil) work.
 // Use run<T>() when state must outlive a single call (windows, tray icons).
 int run(const Callback& func);
+
+// The entry point for a command-line tool:
+// `int main(int argc, char* argv[]) { return Apps::runConsole(argc, argv, body); }`.
+// Stores argv (see commandLineArgs), then runs `body` once inside the
+// bootstrapped loop, as run(func) does, and returns what `body` returned. On
+// macOS the Dock icon is hidden as the body starts (it cannot be before: the
+// loop's bootstrap sets the activation policy from the bundle). A
+// std::exception escaping `body` is printed to stderr as
+// "<program>: <what()>", <program> being argv[0]'s file name less any ".exe",
+// and the exit code is 1. `body` reads the command line from there (commandLineArgs(),
+// Args::Parser::parse()), so it needs no captures.
+int runConsole(int argc, char* argv[], const std::function<int()>& body);
+
+// The same for a command line setCommandLineArgs() has already stored, as in a
+// main() that reads it before choosing between runConsole and run<T>():
+//
+//   setCommandLineArgs(argc, argv);
+//   if (isWorker())
+//       return Apps::runConsole(workerBody);
+//   return Apps::run<MyApp>();
+int runConsole(const std::function<int()>& body);
 
 } // namespace eacp::Apps

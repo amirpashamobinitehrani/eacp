@@ -5,7 +5,9 @@
 #include "StreamingRange.h"
 #include "WebViewDetail.h"
 #include "FileDrag-Windows.h"
+#include <eacp/Graphics/View/FileDragOut-Windows.h>
 #include <eacp/Graphics/DComp-Windows.h>
+#include <eacp/Core/Utils/Format.h>
 #include <eacp/Core/Utils/Strings.h>
 #include <eacp/Core/Threads/ThreadUtils.h>
 
@@ -511,9 +513,7 @@ struct WebView::Native
 
     static std::string hresultHex(HRESULT hr)
     {
-        char buf[16];
-        std::snprintf(buf, sizeof buf, "%08lx", static_cast<unsigned long>(hr));
-        return buf;
+        return Strings::format("{:08x}", static_cast<unsigned long>(hr));
     }
 
     Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions> buildEnvironmentOptions()
@@ -1076,26 +1076,28 @@ struct WebView::Native
             &webMessageToken);
 
         // Auto-grant camera / microphone the way the macOS backend does via its
-        // requestMediaCapturePermissionForOrigin UIDelegate. Without a handler
-        // WebView2 leaves the request in its default state, so getUserMedia from
-        // a page loaded here would never be allowed. Other permission kinds fall
-        // through to WebView2's default (prompt) behaviour.
-        webView->add_PermissionRequested(
-            Microsoft::WRL::Callback<ICoreWebView2PermissionRequestedEventHandler>(
-                [](ICoreWebView2*,
-                   ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT
-                {
-                    auto kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
-                    args->get_PermissionKind(&kind);
+        // requestMediaCapturePermissionForOrigin UIDelegate. Other permission
+        // kinds fall through to WebView2's default (prompt) behaviour, and so
+        // do camera / microphone with Options::promptForMediaCapture.
+        if (! options.promptForMediaCapture)
+        {
+            webView->add_PermissionRequested(
+                Microsoft::WRL::Callback<ICoreWebView2PermissionRequestedEventHandler>(
+                    [](ICoreWebView2*,
+                       ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT
+                    {
+                        auto kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+                        args->get_PermissionKind(&kind);
 
-                    if (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
-                        || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
-                        args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+                        if (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+                            || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
+                            args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
 
-                    return S_OK;
-                })
-                .Get(),
-            &permissionRequestedToken);
+                        return S_OK;
+                    })
+                    .Get(),
+                &permissionRequestedToken);
+        }
 
         // window.open / target="_blank" -> hand the embedder a new app-owned
         // WebView, mirroring the macOS createWebViewWithConfiguration delegate.
@@ -1400,84 +1402,51 @@ struct WebView::Native
         if (FAILED(oleHr))
             return;
 
-        auto pidls = Vector<PIDLIST_ABSOLUTE> {};
+        auto dataObject = createFileDataObject(paths);
 
-        for (auto& path: paths)
+        if (dataObject)
         {
-            auto widePath = Strings::widen(path);
-            // SHParseDisplayName only accepts the OS-native separator: a path
-            // with forward slashes (which is how cross-platform code, e.g.
-            // std::filesystem generic paths, hands them over) fails to parse and
-            // yields no PIDL, so the drag silently never starts. Normalize first.
-            std::replace(widePath.begin(), widePath.end(), L'/', L'\\');
-            PIDLIST_ABSOLUTE pidl = nullptr;
-            if (SUCCEEDED(
-                    SHParseDisplayName(widePath.c_str(), nullptr, &pidl, 0, nullptr))
-                && pidl)
-                pidls.add(pidl);
-        }
+            if (onDragStarted)
+                onDragStarted();
 
-        if (!pidls.empty())
-        {
-            ComPtr<IShellItemArray> items;
-            if (SUCCEEDED(SHCreateShellItemArrayFromIDLists(
-                    static_cast<UINT>(pidls.size()),
-                    const_cast<LPCITEMIDLIST*>(pidls.data()),
-                    &items))
-                && items)
+            if (IsWindow(ownerWindow))
             {
-                ComPtr<IDataObject> dataObject;
-                if (SUCCEEDED(items->BindToHandler(
-                        nullptr, BHID_DataObject, IID_PPV_ARGS(&dataObject)))
-                    && dataObject)
-                {
-                    if (onDragStarted)
-                        onDragStarted();
+                // Attach (not construct-from-raw) so the source keeps the
+                // single ref it is born with; the ComPtr releases it — and
+                // deletes the object — when the drag returns.
+                ComPtr<IDropSource> dropSource;
+                dropSource.Attach(new FileDragSource(
+                    [ownerWindow, dpiScale]
+                    { return fileDragPointFromCursor(ownerWindow, dpiScale); },
+                    onDragMoved));
 
-                    if (IsWindow(ownerWindow))
-                    {
-                        // Attach (not construct-from-raw) so the source keeps the
-                        // single ref it is born with; the ComPtr releases it — and
-                        // deletes the object — when the drag returns.
-                        ComPtr<IDropSource> dropSource;
-                        dropSource.Attach(new FileDragSource(
-                            [ownerWindow, dpiScale]
-                            {
-                                return fileDragPointFromCursor(ownerWindow,
-                                                               dpiScale);
-                            },
-                            onDragMoved));
+                // Register our own window as a drop target for the length
+                // of the drag purely for cursor feedback (see
+                // FileDragTarget) — without it the shell shows ⊘ over our
+                // own window. Fails harmlessly (leaving the old ⊘) if
+                // something else already owns the window's drop slot.
+                ComPtr<IDropTarget> dropTarget;
+                dropTarget.Attach(new FileDragTarget());
+                auto registered =
+                    SUCCEEDED(RegisterDragDrop(ownerWindow, dropTarget.Get()));
 
-                        // Register our own window as a drop target for the length
-                        // of the drag purely for cursor feedback (see
-                        // FileDragTarget) — without it the shell shows ⊘ over our
-                        // own window. Fails harmlessly (leaving the old ⊘) if
-                        // something else already owns the window's drop slot.
-                        ComPtr<IDropTarget> dropTarget;
-                        dropTarget.Attach(new FileDragTarget());
-                        auto registered = SUCCEEDED(
-                            RegisterDragDrop(ownerWindow, dropTarget.Get()));
+                DWORD effect = DROPEFFECT_NONE;
+                SHDoDragDrop(ownerWindow,
+                             dataObject.Get(),
+                             dropSource.Get(),
+                             DROPEFFECT_COPY,
+                             &effect);
 
-                        DWORD effect = DROPEFFECT_NONE;
-                        SHDoDragDrop(ownerWindow,
-                                     dataObject.Get(),
-                                     dropSource.Get(),
-                                     DROPEFFECT_COPY,
-                                     &effect);
+                if (registered)
+                    RevokeDragDrop(ownerWindow);
 
-                        if (registered)
-                            RevokeDragDrop(ownerWindow);
-
-                        // The modal loop is over: report the release point so the
-                        // app can file the drop (or stand its filing UI down).
-                        onDragEnded(fileDragPointFromCursor(ownerWindow, dpiScale));
-                    }
-                }
+                // The modal loop is over: report the release point so the
+                // app can file the drop (or stand its filing UI down).
+                onDragEnded(fileDragPointFromCursor(ownerWindow, dpiScale));
             }
         }
 
-        for (auto* pidl: pidls)
-            CoTaskMemFree(pidl);
+        dataObject.Reset();
 
         if (SUCCEEDED(oleHr))
             OleUninitialize();
@@ -1930,6 +1899,15 @@ void WebView::addScriptMessageHandler(const std::string& name,
         + name + "={postMessage:send};})();");
 
     impl->ensureInitialized();
+
+    // A document-start script only reaches documents created after it, but
+    // WKWebView exposes a handler to the page already loaded too. Mirror that:
+    // a handler added after the first navigation (e.g. a channel attached on
+    // demand) must work without a reload. The script is idempotent, so
+    // running it on the live page as well as on later loads is harmless.
+    if (impl->initialized && impl->webView)
+        impl->webView->ExecuteScript(script.c_str(), nullptr);
+
     impl->queueDocStartScript(std::move(script));
 }
 

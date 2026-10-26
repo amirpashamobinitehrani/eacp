@@ -54,3 +54,12 @@ add_subdirectory(GamepadDemo)
 # A gallery of SVG documents through the component tier, one at a time, with
 # what each one costs the coverage atlas read out beneath it.
 add_subdirectory(SVGDocument)
+
+# GPUComponent under stress: six kinds of custom GPU rendering inside the tree,
+# up to 64 at once in a scrolling grid, stacked under widgets and a captured
+# group, and added, deleted and reparented while they animate.
+add_subdirectory(GPUComponents)
+
+# A layout function rebuilt and reloaded on save under EACP_HOT_RELOAD, and
+# compiled into the app as it stands otherwise.
+add_subdirectory(HotReload)

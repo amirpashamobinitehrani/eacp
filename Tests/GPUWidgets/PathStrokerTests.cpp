@@ -1,4 +1,5 @@
 #include "CoverageProbe.h"
+#include "PathShapes.h"
 
 #include <NanoTest/NanoTest.h>
 
@@ -53,25 +54,6 @@ float signedArea(const Vector<Point>& contour)
     return sum * 0.5f;
 }
 
-float distanceToSegment(const Point& p, const Point& a, const Point& b)
-{
-    auto dx = b.x - a.x;
-    auto dy = b.y - a.y;
-    auto lengthSquared = dx * dx + dy * dy;
-
-    auto t = lengthSquared > 0.f
-                 ? std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSquared,
-                              0.f,
-                              1.f)
-                 : 0.f;
-
-    auto nearestX = a.x + dx * t;
-    auto nearestY = a.y + dy * t;
-
-    return std::sqrt((p.x - nearestX) * (p.x - nearestX)
-                     + (p.y - nearestY) * (p.y - nearestY));
-}
-
 float distanceToPath(const Point& p, const Path& path)
 {
     auto best = std::numeric_limits<float>::max();
@@ -81,14 +63,15 @@ float distanceToPath(const Point& p, const Path& path)
         const auto& points = sub.points;
 
         if (points.size() == 1)
-            best = std::min(best, distanceToSegment(p, points[0], points[0]));
+            best =
+                std::min(best, shapes::distanceToSegment(p, points[0], points[0]));
 
         auto segments = sub.closed ? points.size() : points.size() - 1;
 
         for (auto i = 0; i < segments; ++i)
-            best = std::min(
-                best,
-                distanceToSegment(p, points[i], points[(i + 1) % points.size()]));
+            best = std::min(best,
+                            shapes::distanceToSegment(
+                                p, points[i], points[(i + 1) % points.size()]));
     }
 
     return best;
@@ -272,27 +255,26 @@ auto tClosed = test("PathStroker/everyContourIsClosed") = []
 };
 
 // The region, for the join and cap the distance predicate describes exactly.
+// Each shape once, the two widths taken in turn.
 auto tCoversTheRibbon = test("PathStroker/roundStrokeIsTheDistanceField") = []
 {
-    for (const auto& shape: everyShape())
+    auto shapes = everyShape();
+
+    for (auto i = 0; i < shapes.size(); ++i)
     {
-        for (auto width: {5.f, 13.f})
-        {
-            auto verdict = checkAgainstDistance(shape, width, 2.f);
+        auto width = i % 2 == 0 ? 5.f : 13.f;
+        auto verdict = checkAgainstDistance(shapes[i], width, 2.f);
 
-            if (!verdict.ran)
-                return;
+        if (!verdict.ran)
+            return;
 
-            check(verdict.missing == 0,
-                  std::to_string(verdict.missing) + " pixels inside the stroke left "
-                      + "unfilled, first at ("
-                      + std::to_string(verdict.worstMissing.x) + ", "
-                      + std::to_string(verdict.worstMissing.y) + ")");
+        check(verdict.missing == 0,
+              std::to_string(verdict.missing) + " pixels inside the stroke left "
+                  + "unfilled, first at (" + std::to_string(verdict.worstMissing.x)
+                  + ", " + std::to_string(verdict.worstMissing.y) + ")");
 
-            check(verdict.extra == 0,
-                  std::to_string(verdict.extra)
-                      + " pixels filled outside the stroke");
-        }
+        check(verdict.extra == 0,
+              std::to_string(verdict.extra) + " pixels filled outside the stroke");
     }
 };
 

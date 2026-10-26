@@ -1,13 +1,54 @@
 #include "ComponentHost.h"
 
+#include "../Component/GPUComponent.h"
 #include "../Widgets/TouchScroller.h"
 
 #include <algorithm>
+#include <ranges>
 
 namespace eacp::UI
 {
 namespace
 {
+constexpr auto maximumPathPasses = 9;
+
+// How far an unclipped component's recording reaches either way, in points:
+// past any surface, and well inside what a float holds exactly.
+constexpr auto unclippedReach = 1.0e6f;
+
+Rect everywhere()
+{
+    return {-unclippedReach,
+            -unclippedReach,
+            unclippedReach * 2.f,
+            unclippedReach * 2.f};
+}
+
+FileDropTarget* asInterestedFileDropTarget(Component& component,
+                                           const Vector<std::string>& files)
+{
+    auto* target = dynamic_cast<FileDropTarget*>(&component);
+    return target != nullptr && target->isInterestedInFileDrop(files) ? target
+                                                                      : nullptr;
+}
+
+Component* visibleChildAt(Component& parent, Point& localPoint)
+{
+    for (auto* child: std::ranges::reverse_view(parent.getChildren()))
+    {
+        auto bounds = child->getBounds();
+        auto childPoint = Point {localPoint.x - bounds.x, localPoint.y - bounds.y};
+
+        if (child->isVisible() && child->hitTest(childPoint))
+        {
+            localPoint = childPoint;
+            return child;
+        }
+    }
+
+    return nullptr;
+}
+
 bool isWithin(const Component* component, const Component& subtree)
 {
     for (; component != nullptr; component = component->getParentComponent())
@@ -34,6 +75,8 @@ ComponentHost::ComponentHost()
     // what a press on any part of the tree should do anyway -- clicking an
     // interface is how a user says the keyboard belongs to it.
     setGrabsFocusOnMouseDown(true);
+
+    setAcceptsFileDrops(true);
 }
 
 ComponentHost::~ComponentHost()
@@ -49,6 +92,9 @@ void ComponentHost::componentDeleted(Component& component)
 {
     if (isWithin(hoveredComponent, component))
         hoveredComponent = nullptr;
+
+    if (isWithin(fileDragTarget, component))
+        fileDragTarget = nullptr;
 
     if (isWithin(mouseDownTarget, component))
     {
@@ -87,6 +133,8 @@ void ComponentHost::setRootComponent(Component& newRoot)
     root = &newRoot;
     root->host = this;
     root->setBounds(getRootBounds());
+
+    subtreeAttached(*root);
 
     repaint();
 }
@@ -178,6 +226,16 @@ void ComponentHost::forgetAnimationsIn(Component& subtree)
     retireAnimationClockWhenIdle();
 }
 
+void ComponentHost::subtreeAttached(Component& subtree)
+{
+    for (auto* layer: subtree.getLayers())
+        if (layer->frameComponent != nullptr)
+            layer->frameComponent->resumeIfContinuous();
+
+    for (auto* child: subtree.getChildren())
+        subtreeAttached(*child);
+}
+
 void ComponentHost::advanceAnimations(double seconds)
 {
     advancingAnimations = true;
@@ -212,6 +270,19 @@ void ComponentHost::setAnimationClockEnabled(bool shouldRun)
         startAnimationClock();
 }
 
+void ComponentHost::setAnimationMaxFps(int fps)
+{
+    animationMaxFps = std::max(0, fps);
+
+    if (animationClock != nullptr)
+        animationClock->setMaxFps(animationMaxFps);
+}
+
+int ComponentHost::getAnimationMaxFps() const
+{
+    return animationMaxFps;
+}
+
 void ComponentHost::startAnimationClock()
 {
     if (!animationClockEnabled || animationClock != nullptr)
@@ -219,6 +290,7 @@ void ComponentHost::startAnimationClock()
 
     auto tick = [this](Threads::FrameTime frame) { advanceAnimations(frame.delta); };
     animationClock.create(Threads::DisplayLink::FrameCallback {tick});
+    animationClock->setMaxFps(animationMaxFps);
 }
 
 // Later rather than now: this is usually running inside the link's own tick,
@@ -253,6 +325,14 @@ float ComponentHost::getAtlasFillFraction() const
 int ComponentHost::getAtlasSize() const
 {
     return paths.has_value() ? paths->getWidth() : 0;
+}
+
+void ComponentHost::setAtlasQuietWalksToShrink(int walks)
+{
+    atlasQuietWalks = walks;
+
+    if (paths.has_value())
+        paths->setQuietWalksToShrink(walks);
 }
 
 void ComponentHost::setBackgroundColour(const Color& colour)
@@ -346,6 +426,7 @@ void ComponentHost::resized()
     if (!shapes.has_value())
     {
         paths.emplace();
+        paths->setQuietWalksToShrink(atlasQuietWalks);
         shapes.emplace(*paths,
                        gradientRamps(),
                        Point {bounds.w, bounds.h},
@@ -354,6 +435,7 @@ void ComponentHost::resized()
         meshes.emplace(
             *paths, gradientRamps(), Point {bounds.w, bounds.h}, sampleCount());
         images.emplace(*paths, Point {bounds.w, bounds.h}, sampleCount());
+        images->setPixelScale(backingScale());
         layers.emplace(Point {bounds.w, bounds.h}, sampleCount());
     }
 
@@ -372,6 +454,7 @@ void ComponentHost::setSurfaceSize(Point size)
     shapes->setPixelScale(backingScale());
     meshes->setLogicalSize(size);
     images->setLogicalSize(size);
+    images->setPixelScale(backingScale());
     layers->setLogicalSize(size);
 }
 
@@ -387,6 +470,14 @@ void ComponentHost::markTreeDirty(Component& component)
 void ComponentHost::record(Component& component)
 {
     auto local = component.getLocalBounds();
+
+    // Recorded against no edge at all when the component may paint past its
+    // own: the walk that plays it back is what cuts it, to its parent's clip.
+    if (component.isPaintingUnclipped())
+        local = {-unclippedReach,
+                 -unclippedReach,
+                 unclippedReach * 2.f,
+                 unclippedReach * 2.f};
 
     component.paintList.clear();
     component.overList.clear();
@@ -418,6 +509,8 @@ bool ComponentHost::recordComponent(Component& component)
     if (!component.isVisible())
         return component.needsRecording();
 
+    auto paintedBefore = paintedThisWalk;
+
     if (component.selfDirty)
         record(component);
 
@@ -431,6 +524,21 @@ bool ComponentHost::recordComponent(Component& component)
     // sound: a component below here that is still owed a recording leaves the
     // chain of ancestors marked all the way to the root.
     component.descendantDirty = pending;
+
+    // A captured subtree recorded anywhere but just before its layer renders --
+    // by hand through paintDirtyComponents, or again because the glyph atlas
+    // was cleared under this walk -- leaves the layer holding a picture of the
+    // recordings it replaced, and the layer has already been rendered for this
+    // frame. So it is marked, and the frame after this one draws it again.
+    //
+    // Judged by what was painted rather than by what is still owed, which a
+    // hidden child never recorded goes on owing for as long as it is hidden.
+    if (component.capturingLayer != nullptr && &component != recordingContent
+        && paintedThisWalk != paintedBefore)
+    {
+        component.capturingLayer->contentChanged();
+        repaint();
+    }
 
     return pending;
 }
@@ -494,6 +602,17 @@ void ComponentHost::playComponent(Component& component,
                                   Point origin,
                                   const Rect& clip)
 {
+    if (component.capturingLayer != nullptr)
+        return;
+
+    playSubtree(component, player, origin, clip);
+}
+
+void ComponentHost::playSubtree(Component& component,
+                                DrawPlayer& player,
+                                Point origin,
+                                const Rect& clip)
+{
     if (!component.isVisible())
         return;
 
@@ -501,8 +620,10 @@ void ComponentHost::playComponent(Component& component,
     auto position = Point {origin.x + bounds.x, origin.y + bounds.y};
 
     // Where this component may draw, in surface points: its own bounds, narrowed
-    // by everything its ancestors left of them.
-    auto visible = clip.intersection({position.x, position.y, bounds.w, bounds.h});
+    // by everything its ancestors left of them -- or, for one painting
+    // unclipped, everything they left whatever its bounds.
+    auto own = Rect {position.x, position.y, bounds.w, bounds.h};
+    auto visible = component.isPaintingUnclipped() ? clip : clip.intersection(own);
 
     // A component scrolled out of its parent, or entirely behind an opaque
     // ancestor's clip, costs nothing at all. The whole subtree goes with it,
@@ -531,6 +652,13 @@ void ComponentHost::rasterizeDirtyPaths(Component& component,
                                         GPUWidgets::CoverageBatch& batch,
                                         PathWalk& walk)
 {
+    // A hidden subtree is not drawn, so it takes no room in the atlas either.
+    // Its shapes keep their dirty flag rather than losing it -- this walk visits
+    // the whole tree every frame, so the first one after the subtree is shown
+    // again is the one that rasterizes them, before anything records their uv.
+    if (!component.isVisible())
+        return;
+
     for (auto* shape: component.getPathShapes())
     {
         if (shape->isDirty())
@@ -582,17 +710,121 @@ void ComponentHost::renderLayers(GPU::Frame& frame)
         return;
 
     lastRenderedLayers = 0;
-    renderLayers(*root, frame);
+    paintedThisWalk = 0;
+    renderedGPUComponentsThisWalk = 0;
+    culledGPUComponentsThisWalk = 0;
+    hiddenGPUComponentsThisWalk = 0;
+
+    auto size = frame.logicalSize();
+    renderLayers(*root, frame, {}, {0.f, 0.f, size.x, size.y});
+
+    lastRenderedGPUComponents = renderedGPUComponentsThisWalk;
+    lastCulledGPUComponents = culledGPUComponentsThisWalk;
+    lastHiddenGPUComponents = hiddenGPUComponentsThisWalk;
 }
 
-void ComponentHost::renderLayers(Component& component, GPU::Frame& frame)
+void ComponentHost::renderLayers(Component& component,
+                                 GPU::Frame& frame,
+                                 Point origin,
+                                 const Rect& clip)
 {
+    // Skipped while hidden, as its paths are: a layer rendered now would draw
+    // shapes that have not been rasterized, and be marked rendered with nothing
+    // in it. Left dirty, it renders on the frame the subtree is shown -- after
+    // rasterizePaths has given its shapes masks in the atlas as it is then.
+    if (!component.isVisible())
+    {
+        markGPUComponentsHidden(component);
+        return;
+    }
+
+    auto bounds = component.getBounds();
+    auto position = Point {origin.x + bounds.x, origin.y + bounds.y};
+    auto own = Rect {position.x, position.y, bounds.w, bounds.h};
+
+    auto reach = component.capturingLayer != nullptr ? everywhere() : clip;
+
+    auto visible = component.isPaintingUnclipped() ? reach : reach.intersection(own);
+
+    // Walked whether or not anything of it is visible: a culled GPUComponent
+    // still has to hear that it is, and every other layer renders as it did.
     for (auto* child: component.getChildren())
-        renderLayers(*child, frame);
+        renderLayers(*child, frame, position, visible);
+
+    auto visibleLocal = visible.isEmpty() ? Rect {}
+                                          : Rect {visible.x - position.x,
+                                                  visible.y - position.y,
+                                                  visible.w,
+                                                  visible.h};
+
+    // An onRender layer samples whatever it likes, and what it is most likely
+    // to sample is a layer registered before it -- so one rendering again is
+    // taken to mean every onRender layer after it has to as well.
+    auto earlierLayerRendered = false;
 
     for (auto* layer: component.getLayers())
-        if (layer->isDirty())
+    {
+        if (layer->rendersFrame())
+        {
+            if (renderFrameLayer(*layer, frame, visibleLocal, earlierLayerRendered))
+                earlierLayerRendered = true;
+
+            continue;
+        }
+
+        if (recordContent(*layer))
+            layer->contentChanged();
+
+        if (earlierLayerRendered && layer->rendersOwnPass())
+            layer->contentChanged();
+
+        if (layer->needsRendering(backingScale()))
+        {
             renderLayer(*layer, frame);
+            earlierLayerRendered = true;
+        }
+    }
+}
+
+bool ComponentHost::recordContent(Layer& layer)
+{
+    auto* content = layer.getContent();
+
+    if (layer.rendersOwnPass() || content == nullptr || !content->isVisible()
+        || !content->needsRecording())
+        return false;
+
+    recordingContent = content;
+
+    auto paintedBefore = paintedThisWalk;
+    auto before = renderer().generation();
+
+    recordComponent(*content);
+
+    // The glyph atlas filled and was cleared, as recordDirtyTree has to allow
+    // for -- and answered the same way, against the whole tree, since every
+    // recording made before this one names texels that are somebody else's.
+    if (renderer().generation() != before)
+    {
+        markTreeDirty(*root);
+        recordComponent(*content);
+    }
+
+    recordingContent = nullptr;
+
+    return paintedThisWalk != paintedBefore;
+}
+
+void ComponentHost::recordLayer(Layer& layer, DrawList& list)
+{
+    auto bounds = layer.getBounds();
+    auto g = Graphics {list, *ramps, renderer(), {0.f, 0.f, bounds.w, bounds.h}};
+
+    // So the content draws in the coordinates it was authored in and the
+    // layer's own top-left lands on the texture's.
+    g.translate(-bounds.x, -bounds.y);
+
+    layer.onPaint(g);
 }
 
 void ComponentHost::renderLayer(Layer& layer, GPU::Frame& frame)
@@ -602,6 +834,24 @@ void ComponentHost::renderLayer(Layer& layer, GPU::Frame& frame)
     if (!layer.ensureTexture(backingScale()))
         return;
 
+    if (layer.rendersOwnPass())
+    {
+        renderOwnPass(layer, frame);
+        return;
+    }
+
+    // Recorded before the pass opens, as a component's band is: what the
+    // drawing asks for on the way - a picture rendered off-screen, which
+    // nests a frame and flushes this one - must not find an encoder open.
+    // Played straight away rather than kept: a layer already has a cache --
+    // its own texture, which is only rebuilt when the layer is dirty -- so a
+    // second one for the drawing that fills it would be a list that is
+    // written and read once.
+    auto list = std::optional<DrawList> {};
+
+    if (layer.getContent() == nullptr)
+        recordLayer(layer, list.emplace());
+
     // The renderers are the tree's own, pointed at this pass and told the
     // layer's size. One set rather than a second, because a pipeline is
     // unaffected by what it draws into: the target's format and sample count are
@@ -610,6 +860,11 @@ void ComponentHost::renderLayer(Layer& layer, GPU::Frame& frame)
     descriptor.clearColor = Color::black(0.f);
 
     auto pass = frame.beginPass(layer.getTexture(), descriptor);
+
+    // The texture is kept across a shrink, so it may be larger than the content.
+    // Mapped onto the whole of it, the bounds would be stretched across texels
+    // the composite never samples.
+    pass.setViewport(layer.getContentArea());
 
     setSurfaceSize({bounds.w, bounds.h});
 
@@ -621,23 +876,6 @@ void ComponentHost::renderLayer(Layer& layer, GPU::Frame& frame)
     text->begin();
 
     {
-        // Recorded and played straight away rather than kept. A layer already
-        // has a cache -- its own texture, which is only rebuilt when the layer
-        // is dirty -- so a second one for the drawing that fills it would be a
-        // list that is written and read once.
-        auto list = DrawList {};
-
-        {
-            auto g =
-                Graphics {list, *ramps, renderer(), {0.f, 0.f, bounds.w, bounds.h}};
-
-            // So the content draws in the coordinates it was authored in and the
-            // layer's own top-left lands on the texture's.
-            g.translate(-bounds.x, -bounds.y);
-
-            layer.onPaint(g);
-        }
-
         auto player = DrawPlayer {*shapes,
                                   *meshes,
                                   *images,
@@ -647,7 +885,11 @@ void ComponentHost::renderLayer(Layer& layer, GPU::Frame& frame)
                                   {0.f, 0.f, bounds.w, bounds.h},
                                   backingScale()};
 
-        player.play(list, {}, {0.f, 0.f, bounds.w, bounds.h});
+        if (list)
+            player.play(*list, {}, {0.f, 0.f, bounds.w, bounds.h});
+        else
+            playContent(layer, player);
+
         player.flush();
     }
 
@@ -661,6 +903,176 @@ void ComponentHost::renderLayer(Layer& layer, GPU::Frame& frame)
 
     layer.markRendered();
     ++lastRenderedLayers;
+}
+
+// The captured subtree's own recordings, played as the frame would have played
+// them, from where the content sits in the owner less the layer's corner. A
+// content that is hidden, or no longer below the owner, draws nothing.
+void ComponentHost::playContent(Layer& layer, DrawPlayer& player)
+{
+    auto& content = *layer.getContent();
+    auto bounds = layer.getBounds();
+    auto origin = Point {-bounds.x, -bounds.y};
+
+    auto* ancestor = content.getParentComponent();
+
+    for (; ancestor != nullptr && ancestor != &layer.owner;
+         ancestor = ancestor->getParentComponent())
+    {
+        if (!ancestor->isVisible())
+            return;
+
+        origin.x += ancestor->getBounds().x;
+        origin.y += ancestor->getBounds().y;
+    }
+
+    if (ancestor == nullptr)
+        return;
+
+    playSubtree(content, player, origin, {0.f, 0.f, bounds.w, bounds.h});
+}
+
+// A pass of the caller's own, onto the layer's texture and nothing else. The
+// tier's renderers are not involved, so neither is the surface size they
+// project from.
+void ComponentHost::renderOwnPass(Layer& layer, GPU::Frame& frame)
+{
+    auto descriptor = GPU::RenderPassDescriptor {};
+    descriptor.clearColor = Color::black(0.f);
+    descriptor.depthAction = GPU::DepthAction::Clear;
+
+    auto area = layer.getContentArea();
+
+    {
+        auto pass = frame.beginPass(layer.getTexture(), descriptor);
+        pass.setViewport(area);
+
+        layer.onRender(pass, area);
+    }
+
+    layer.markRendered();
+    ++lastRenderedLayers;
+}
+
+// The component's whole render(), with this frame pointed at the layer's
+// texture: what it records lands on this frame's command buffer, ahead of the
+// pass that composites it.
+//
+// The bounds are synced rather than set: setting them asks for a frame, and
+// this is the frame.
+bool ComponentHost::renderFrameLayer(Layer& layer,
+                                     GPU::Frame& frame,
+                                     const Rect& visibleLocal,
+                                     bool earlierLayerRendered)
+{
+    auto& component = *layer.frameComponent;
+
+    layer.syncFrameBounds(component.getLocalBounds());
+
+    if (component.selfDirty || earlierLayerRendered)
+        layer.contentChanged();
+
+    component.resumeIfContinuous();
+    component.setVisibility(visibleLocal);
+    component.collectGpuTime();
+
+    if (component.wasCulledLastFrame())
+    {
+        ++culledGPUComponentsThisWalk;
+        return false;
+    }
+
+    if (!layer.needsRendering(backingScale())
+        || !layer.ensureTexture(backingScale()))
+        return false;
+
+    {
+        auto& target = layer.getTexture();
+        auto redirect = GPU::Frame::Redirect {
+            frame, target, backingScale(), component.timingLabel()};
+        component.renderFrame(frame, target);
+    }
+
+    layer.markRendered();
+    ++lastRenderedLayers;
+    ++renderedGPUComponentsThisWalk;
+
+    return true;
+}
+
+void ComponentHost::markGPUComponentsHidden(Component& component)
+{
+    for (auto* layer: component.getLayers())
+    {
+        if (layer->frameComponent != nullptr)
+        {
+            layer->frameComponent->markHidden();
+            layer->frameComponent->collectGpuTime();
+            ++hiddenGPUComponentsThisWalk;
+        }
+    }
+
+    for (auto* child: component.getChildren())
+        markGPUComponentsHidden(*child);
+}
+
+void ComponentHost::dropLayerTextures(Component& component)
+{
+    for (auto* layer: component.getLayers())
+    {
+        layer->texture.reset();
+        layer->ready = false;
+        layer->dirty = true;
+    }
+
+    for (auto* child: component.getChildren())
+        dropLayerTextures(*child);
+}
+
+void ComponentHost::notifyDeviceRestored(Component& component)
+{
+    for (auto* layer: component.getLayers())
+        if (layer->frameComponent != nullptr)
+        {
+            layer->frameComponent->renderedTarget.reset();
+            layer->frameComponent->onDeviceRestored();
+        }
+
+    for (auto* child: component.getChildren())
+        notifyDeviceRestored(*child);
+}
+
+// Nothing made on the old device draws on the new one, so everything is made
+// again: the renderers and the atlas by the build resized() does, the glyph
+// and ramp textures on their first ask, the images as the tree
+// repaints and asks for them, and every layer as it renders.
+void ComponentHost::deviceRestored()
+{
+    shapes.reset();
+    meshes.reset();
+    images.reset();
+    layers.reset();
+    paths.reset();
+    masks.clear();
+    pathBatch.emplace();
+    text.reset();
+    ramps.reset();
+    imageCache.clear();
+
+    lastPathScale = 0.f;
+    lastRecordScale = 0.f;
+
+    ComponentHost::resized();
+
+    if (root == nullptr)
+        return;
+
+    dropLayerTextures(*root);
+    markTreeDirty(*root);
+    markAllPathsDirty(*root);
+    notifyDeviceRestored(*root);
+
+    repaint();
 }
 
 // Every path whose geometry changed since the last frame, drawn into the shared
@@ -692,22 +1104,33 @@ void ComponentHost::rasterizePaths(GPU::Frame& frame)
 
     auto generationBefore = paths->generation();
 
+    // Room the tree no longer needs goes back before the walk, which then
+    // rasterizes everything into the smaller atlas -- the same answer a grow
+    // gets, a frame early rather than mid-walk.
+    paths->setRelocationAllowed(true);
+
+    if (paths->shrinkToFit())
+    {
+        markAllPathsDirty(*root);
+        masks.clear();
+    }
+
     auto walk = PathWalk {};
 
-    // Twice at most. The first pass may move the atlas under what it has already
-    // placed, and the second runs against the layout that came out of it. A
-    // third would only be needed if the whole tree's masks could not fit in one
-    // atlas at all, and then the honest outcome is that the ones that did not
-    // fit are missing rather than that the frame never ends.
-    for (auto attempt = 0; attempt < 2; ++attempt)
+    // Until a pass moves nothing. A pass may move the atlas under what it has
+    // already placed, and the next runs against the layout that came out of it.
+    // If the whole tree's masks cannot fit in one atlas at all, the honest
+    // outcome is that the ones that did not fit are missing rather than that the
+    // frame never ends.
+    for (auto attempt = 0; attempt < maximumPathPasses; ++attempt)
     {
-        // Which is only the honest outcome if the second pass is forbidden to
-        // move anything. A move there is unanswerable -- there is no third pass
-        // to rebuild what it displaced -- so a shape placed early would keep a
-        // uv into texels a later shape has since been handed, and draw that
+        // Which is only the honest outcome if the last pass is forbidden to
+        // move anything. A move there is unanswerable -- there is no pass after
+        // it to rebuild what it displaced -- so a shape placed early would keep
+        // a uv into texels a later shape has since been handed, and draw that
         // shape's coverage instead of its own. Wrong rather than missing, and
         // silent either way. Refused, the mask is simply absent and counted.
-        paths->setRelocationAllowed(attempt == 0);
+        paths->setRelocationAllowed(attempt < maximumPathPasses - 1);
 
         walk = PathWalk {};
 
@@ -715,8 +1138,8 @@ void ComponentHost::rasterizePaths(GPU::Frame& frame)
         // costs no GPU work at all: beginning the batch again is what throws it
         // away, where recording a dispatch per shape meant every one of them had
         // already been issued against a layout that no longer held.
-        pathBatch.begin(paths->getTexture());
-        rasterizeDirtyPaths(*root, pathBatch, walk);
+        pathBatch->begin(paths->getTexture());
+        rasterizeDirtyPaths(*root, *pathBatch, walk);
 
         if (!walk.atlasMoved)
             break;
@@ -735,10 +1158,10 @@ void ComponentHost::rasterizePaths(GPU::Frame& frame)
         masks.clear();
     }
 
-    if (!pathBatch.isEmpty())
+    if (!pathBatch->isEmpty())
     {
         auto compute = frame.beginCompute();
-        pathBatch.dispatch(compute);
+        pathBatch->dispatch(compute);
     }
 
     // The atlas grew or compacted, so every uv a component recorded points at
@@ -816,7 +1239,13 @@ void ComponentHost::render(GPU::Frame& frame)
     // there being nothing to tell it the layer had arrived.
     renderLayers(frame);
 
+    // A captured subtree is recorded as its layer renders, so what was painted
+    // there is this frame's painting as much as what the walk paints.
+    auto paintedForLayers = paintedThisWalk;
+
     recordTree();
+
+    lastPaintedComponents += paintedForLayers;
 
     text->setViewport({bounds.w, bounds.h}, backingScale());
     text->begin();
@@ -850,11 +1279,15 @@ MouseEvent ComponentHost::makeEvent(const Component& target,
     result.position = target.rootPointToLocal(event.pos);
     result.downPosition = target.rootPointToLocal(dragOrigin);
     result.delta = event.delta;
+    result.rawDelta = event.rawDelta;
+    result.pressure = event.pressure;
+    result.scrollPhase = event.scrollPhase;
     result.button = event.button;
     result.modifiers = event.modifiers;
     result.clickCount = event.clickCount;
     result.wheelDelta = event.delta;
     result.preciseWheel = event.preciseScrolling;
+    result.magnifyScale = event.magnifyScale;
     result.fromTouch = event.fromTouch;
     result.timestamp = event.timestamp;
 
@@ -879,12 +1312,17 @@ void ComponentHost::setHoveredComponent(Component* component,
     {
         hoveredComponent->mouseOver = true;
         hoveredComponent->mouseEnter(makeEvent(*hoveredComponent, event));
+    }
+
+    updateMouseCursor();
+}
+
+void ComponentHost::updateMouseCursor()
+{
+    if (hoveredComponent != nullptr)
         setMouseCursor(hoveredComponent->getMouseCursor());
-    }
     else
-    {
         setMouseCursor(eacp::Graphics::MouseCursor::Default);
-    }
 }
 
 void ComponentHost::updateHover(Component* target,
@@ -1071,6 +1509,7 @@ void ComponentHost::mouseDown(const eacp::Graphics::MouseEvent& hostEvent)
 
     dragOrigin = event.pos;
     lastMousePosition = event.pos;
+    pressClickCount = event.clickCount;
 
     touch = {event.fromTouch, false, event.timestamp};
 
@@ -1128,7 +1567,17 @@ void ComponentHost::mouseUp(const eacp::Graphics::MouseEvent& hostEvent)
     if (mouseDownTarget != nullptr)
         mouseDownTarget->mouseUp(makeEvent(*mouseDownTarget, event));
 
+    // After the release, as JUCE sends it, and only to a target the release
+    // left alive: componentDeleted clears mouseDownTarget.
+    if (mouseDownTarget != nullptr && pressClickCount == 2)
+    {
+        auto doubleClick = makeEvent(*mouseDownTarget, event);
+        doubleClick.clickCount = pressClickCount;
+        mouseDownTarget->mouseDoubleClick(doubleClick);
+    }
+
     mouseDownTarget = nullptr;
+    pressClickCount = 1;
     touch = {};
 
     // The pointer may have left the pressed component during the drag, so the
@@ -1174,6 +1623,121 @@ void ComponentHost::mouseWheel(const eacp::Graphics::MouseEvent& hostEvent)
     }
 }
 
+void ComponentHost::mouseMagnify(const eacp::Graphics::MouseEvent& hostEvent)
+{
+    if (root == nullptr)
+        return;
+
+    auto event = inRootSpace(hostEvent);
+    auto* target = root->getComponentAt(event.pos);
+
+    while (target != nullptr)
+    {
+        if (target->mouseMagnify(makeEvent(*target, event)))
+            return;
+
+        target = target->getParentComponent();
+    }
+}
+
+Point ComponentHost::toRootSpace(Point position) const
+{
+    if (root == nullptr)
+        return position;
+
+    return {position.x - root->getBounds().x, position.y - root->getBounds().y};
+}
+
+Component* ComponentHost::findFileDropTarget(const Vector<std::string>& files,
+                                             Point positionInRoot) const
+{
+    if (root == nullptr || files.empty() || !root->isVisible()
+        || !root->hitTest(positionInRoot))
+        return nullptr;
+
+    auto* found = static_cast<Component*>(nullptr);
+    auto localPoint = positionInRoot;
+
+    for (auto* component = root; component != nullptr;
+         component = visibleChildAt(*component, localPoint))
+        if (asInterestedFileDropTarget(*component, files) != nullptr)
+            found = component;
+
+    return found;
+}
+
+void ComponentHost::setFileDragTarget(Component* target, Point positionInRoot)
+{
+    if (fileDragTarget == target)
+        return;
+
+    if (fileDragTarget != nullptr)
+        if (auto* previous = dynamic_cast<FileDropTarget*>(fileDragTarget))
+            previous->fileDragExit(fileDragFiles);
+
+    fileDragTarget = target;
+
+    if (fileDragTarget != nullptr)
+        if (auto* next = dynamic_cast<FileDropTarget*>(fileDragTarget))
+            next->fileDragEnter(fileDragFiles,
+                                fileDragTarget->rootPointToLocal(positionInRoot));
+}
+
+bool ComponentHost::updateFileDrag(const Vector<std::string>& files, Point position)
+{
+    auto positionInRoot = toRootSpace(position);
+    auto* target = findFileDropTarget(files, positionInRoot);
+
+    fileDragFiles = files;
+
+    if (target != fileDragTarget)
+    {
+        setFileDragTarget(target, positionInRoot);
+        return target != nullptr;
+    }
+
+    if (target == nullptr)
+        return false;
+
+    if (auto* current = dynamic_cast<FileDropTarget*>(target))
+        current->fileDragMove(files, target->rootPointToLocal(positionInRoot));
+
+    return true;
+}
+
+bool ComponentHost::fileDragEnter(const Vector<std::string>& files, Point position)
+{
+    return updateFileDrag(files, position);
+}
+
+bool ComponentHost::fileDragMove(const Vector<std::string>& files, Point position)
+{
+    return updateFileDrag(files, position);
+}
+
+void ComponentHost::fileDragExit()
+{
+    setFileDragTarget(nullptr, {});
+    fileDragFiles.clear();
+}
+
+void ComponentHost::filesDropped(const Vector<std::string>& files, Point position)
+{
+    auto positionInRoot = toRootSpace(position);
+    auto* target = findFileDropTarget(files, positionInRoot);
+
+    if (target != fileDragTarget)
+        setFileDragTarget(nullptr, positionInRoot);
+
+    fileDragTarget = nullptr;
+    fileDragFiles.clear();
+
+    if (target != nullptr)
+        if (auto* dropTarget = dynamic_cast<FileDropTarget*>(target))
+            dropTarget->filesDropped(files,
+                                     target->rootPointToLocal(positionInRoot));
+}
+
 Component* ComponentHost::getRootComponent() const
 {
     return root;
@@ -1182,6 +1746,32 @@ Component* ComponentHost::getRootComponent() const
 const Font& ComponentHost::getFont() const
 {
     return font;
+}
+
+void ComponentHost::setTheme(const Theme& themeToUse)
+{
+    theme = themeToUse;
+
+    // The two things the host draws with itself, taken only from a theme that
+    // holds them, so a theme of a few colours leaves the face and the backdrop
+    // as they were.
+    if (auto* face = theme.find(ThemeKeys::font))
+        setFont(*face);
+
+    if (auto* backdrop = theme.find(ThemeKeys::background))
+        background = *backdrop;
+
+    // Every widget recorded its colours from the theme it found, so all of them
+    // have to paint again, as for a change of face.
+    if (root != nullptr)
+        markTreeDirty(*root);
+
+    repaint();
+}
+
+const Theme& ComponentHost::getTheme() const
+{
+    return theme;
 }
 
 ImageCache& ComponentHost::getImageCache()
@@ -1222,6 +1812,21 @@ int ComponentHost::getLastRendererSwitchCount() const
 int ComponentHost::getLastRenderedLayerCount() const
 {
     return lastRenderedLayers;
+}
+
+int ComponentHost::getLastRenderedGPUComponentCount() const
+{
+    return lastRenderedGPUComponents;
+}
+
+int ComponentHost::getLastCulledGPUComponentCount() const
+{
+    return lastCulledGPUComponents;
+}
+
+int ComponentHost::getLastHiddenGPUComponentCount() const
+{
+    return lastHiddenGPUComponents;
 }
 
 int ComponentHost::getLastDroppedPathCount() const

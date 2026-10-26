@@ -30,11 +30,17 @@ public:
     void beginFrame(std::uint64_t frameIndex, Device& device);
 
     // Called by Frame::beginPass and Frame::beginCompute for a pass carrying a
-    // label. Returns the pass's ordinal in this frame - its two samples are at
-    // 2 * ordinal and 2 * ordinal + 1 - or -1 when the pass is not being
-    // timed, which is what an unlabelled pass, an unsupported device and a
+    // label. Returns the pass's ordinal in this frame - which samples are its
+    // is the backend's layout, two a pass on D3D12 and Vulkan and four on
+    // Metal - or -1 when the pass is not being timed, which is what an unlabelled pass, an unsupported device and a
     // frame already holding maxTimedPasses labelled passes all get.
     int beginPass(std::string_view label);
+
+    // Times every pass begun until the next call under `scope`, an unlabelled
+    // one as `scope` itself and a labelled one as "scope/label"; empty turns it
+    // off. Returns the scope it replaced. What Frame::Redirect's timing label
+    // sets, and the view has to outlive it.
+    std::string_view setScope(std::string_view scope);
 
     // Called by Frame's destructor: endFrame before it commits, noteSubmitted
     // after, since a D3D12 fence value does not exist until then.
@@ -45,12 +51,19 @@ public:
     // name it when the pass begins. Null when this frame is not being timed.
     void* nativeSamples() const;
 
+    // Stops timing the frame in progress and hands back the slot it was timing
+    // into, for resume to restore: what a frame nested in another
+    // (Device::enterFrame) does, so its passes are timed by no one rather than
+    // by the frame around it.
+    int suspend();
+    void resume(int slot);
+
     // See GpuTimestamps::beginRecording.
     void beginRecording(void* nativeCommandBuffer);
 
     // The most recent frame the GPU has finished and reported. Empty - no
     // passes, and a zero frameIndex - until one has.
-    constexpr const FrameTimings& lastTimings() const { return latest; }
+    const FrameTimings& lastTimings() const;
 
     // See GpuTimestamps::isSupported. Only meaningful once a frame has begun,
     // which is what builds the timestamp resources.
@@ -76,6 +89,8 @@ private:
     Array<Slot, GpuTimestamps::slotCount> slots;
 
     FrameTimings latest;
+
+    std::string_view scope;
 
     // The slot the frame being encoded writes into, and how many labelled
     // passes it has had so far. -1 when the frame is not being timed.

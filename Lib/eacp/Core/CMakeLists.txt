@@ -1,37 +1,57 @@
 add_library(eacp-core STATIC)
 target_include_directories(eacp-core PUBLIC ${CMAKE_CURRENT_LIST_DIR}/../../)
 
-find_package(EADataStructures REQUIRED)
 target_link_libraries(eacp-core PUBLIC ea_data_structures)
 
-find_package(ResEmbed REQUIRED)
-find_package(Miro REQUIRED)
 target_link_libraries(eacp-core PUBLIC ResEmbed Miro)
 
 # PRIVATE: Zip.cpp is the only thing that includes miniz.h.
 target_link_libraries(eacp-core PRIVATE miniz)
 
+# PRIVATE: no public eacp header may include fmt; Utils/Format.cpp is the only
+# thing that includes it.
+target_link_libraries(eacp-core PRIVATE fmt)
+
+# fmt's base.h static_asserts that cl compiles string literals as UTF-8. The
+# shared PCH image is not built under /utf-8, so this one file goes without it.
+if (MSVC)
+    set_source_files_properties(Utils/Format.cpp PROPERTIES
+            COMPILE_OPTIONS /utf-8
+            SKIP_PRECOMPILE_HEADERS ON)
+endif ()
+
 target_sources(eacp-core PRIVATE
         App/App.cpp
+        App/Args.cpp
         Maths/Mat4.cpp
         Platform/AppInfo.cpp
         Platform/Platform.cpp
         Plugins/DynamicLibrary.cpp
+        Plugins/HotReloadLoop.cpp
+        Plugins/ReloadableLibrary.cpp
+        Process/BuildRunner.cpp
         Process/Process.cpp
         Threads/Async.cpp
         Threads/CallAfter.cpp
         Threads/EventLoop.cpp
         Threads/TaskSemaphore.cpp
+        Threads/Thread.cpp
         Threads/ThreadId.cpp
         Utils/Base64.cpp
+        Utils/Console.cpp
         Utils/Environment.cpp
         Utils/File.cpp
         Utils/FilePath.cpp
+        Utils/FileWatcher.cpp
+        Utils/FileWriter.cpp
         Utils/Files.cpp
+        Utils/Format.cpp
         Utils/Logging.cpp
         Utils/MemoryMappedFile.cpp
         Utils/Random.cpp
+        Utils/SourceWatcher.cpp
         Utils/Strings.cpp
+        Utils/TemporaryFile.cpp
         Utils/Time.cpp
         Utils/Zip.cpp)
 
@@ -59,9 +79,11 @@ if (APPLE)
         target_sources(eacp-core PRIVATE
                 App/App-iOS.mm
                 App/Clipboard-iOS.mm
+                App/FilePickerAsync-Default.cpp
                 App/LoginItem-iOS.cpp
                 Process/Process-iOS.cpp
-                Threads/EventLoop-iOS.mm)
+                Threads/EventLoop-iOS.mm
+                Utils/FilesOpen-Default.cpp)
         target_link_libraries(eacp-core PRIVATE "-framework UIKit")
     else ()
         target_sources(eacp-core PRIVATE
@@ -70,7 +92,8 @@ if (APPLE)
                 App/LoginItem-macOS.mm
                 Process/Process-Posix.cpp
                 Process/SpawnDirectory-Posix.cpp
-                Threads/EventLoop-macOS.mm)
+                Threads/EventLoop-macOS.mm
+                Utils/FilesOpen-macOS.mm)
         target_link_libraries(eacp-core PRIVATE
                 "-framework Cocoa"
                 "-framework Security"
@@ -81,6 +104,7 @@ elseif (WIN32)
     target_sources(eacp-core PRIVATE
             App/App-Windows.cpp
             App/Clipboard-Windows.cpp
+            App/FilePickerAsync-Default.cpp
             App/LoginItem-Windows.cpp
             Platform/ScopedAutoReleasePool-Default.cpp
             Plugins/DynamicLibrary-Windows.cpp
@@ -92,12 +116,14 @@ elseif (WIN32)
             Utils/Environment-Windows.cpp
             Utils/FilePath-Windows.cpp
             Utils/Files-Windows.cpp
+            Utils/FilesOpen-Windows.cpp
             Utils/Logging-Windows.cpp
             Utils/MemoryMappedFile-Windows.cpp)
     target_link_libraries(eacp-core PRIVATE
             windowsapp crypt32 user32 advapi32 shell32 ole32 uuid)
 elseif (UNIX AND NOT APPLE)
     target_sources(eacp-core PRIVATE
+            App/FilePickerAsync-Default.cpp
             App/LoginItem-Linux.cpp
             Platform/ScopedAutoReleasePool-Default.cpp
             Plugins/DynamicLibrary-Linux.cpp
@@ -123,6 +149,7 @@ elseif (UNIX AND NOT APPLE)
                 Threads/EventLoop-Android.cpp
                 Utils/FilePath-Android.cpp
                 Utils/Files-Android.cpp
+                Utils/FilesOpen-Default.cpp
                 Utils/Logging-Android.cpp)
         target_link_libraries(eacp-core PUBLIC android log)
     else ()
@@ -133,6 +160,7 @@ elseif (UNIX AND NOT APPLE)
                 Threads/EventLoopWait-Linux.cpp
                 Utils/FilePath-Linux.cpp
                 Utils/Files-Linux.cpp
+                Utils/FilesOpen-Linux.cpp
                 Utils/Logging-Posix.cpp)
     endif ()
 endif ()

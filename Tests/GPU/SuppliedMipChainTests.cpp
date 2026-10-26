@@ -27,6 +27,8 @@ using namespace nano;
 using namespace eacp;
 using namespace eacp::GPU;
 
+namespace SuppliedMipChainTests
+{
 namespace
 {
 constexpr std::uint32_t red = 0xff0000ff; // RGBA8, little-endian: A B G R
@@ -45,9 +47,12 @@ struct QuadVertex
     float uv[2];
 };
 } // namespace
+} // namespace SuppliedMipChainTests
 
-EACP_SHADER_VALUE(QuadVertex, Float2)
+EACP_SHADER_VALUE(SuppliedMipChainTests::QuadVertex, Float2)
 
+namespace SuppliedMipChainTests
+{
 namespace
 {
 constexpr QuadVertex unitQuad[] = {
@@ -391,27 +396,20 @@ auto tRefusals = test("SuppliedMipChain/refusesWhatItCannotMean") = []
     }
 
     {
-        // A render target's pixels come from the GPU, so there was never a chain
-        // to supply - and a kernel output is the same case.
+        // A render target's or a kernel output's levels come from the GPU, so
+        // asking for them with no pixels is not refused: the GPU fills them.
         auto target = base;
         target.renderTarget = true;
 
-        check(!Device::shared().makeTexture(target, nullptr).isValid());
+        auto targetTexture = Device::shared().makeTexture(target, nullptr);
+
+        check(targetTexture.isValid());
+        check(targetTexture.mipLevels() == base.mipLevels);
 
         auto kernelOutput = base;
         kernelOutput.computeWrite = true;
 
-        check(!Device::shared().makeTexture(kernelOutput, nullptr).isValid());
-    }
-
-    {
-        auto cube = base;
-        cube.cube = true;
-        cube.width = 4;
-        cube.height = 4;
-        cube.mipLevels = 3;
-
-        check(!Device::shared().makeTexture(cube, pixels.data()).isValid());
+        check(Device::shared().makeTexture(kernelOutput, nullptr).isValid());
     }
 
     // And the shape that is *not* refused, so the cases above are refusing what
@@ -446,3 +444,4 @@ auto tPartialChain = test("SuppliedMipChain/aPartialChainIsTakenAsItIs") = []
         for (auto x = 0; x < minified.width(); ++x)
             check(isGreen(minified.at(x, y)));
 };
+} // namespace SuppliedMipChainTests

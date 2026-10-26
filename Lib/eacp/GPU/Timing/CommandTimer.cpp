@@ -1,6 +1,7 @@
 #include "CommandTimer.h"
 
 #include <algorithm>
+#include <vector>
 
 namespace eacp::GPU
 {
@@ -66,15 +67,25 @@ const FrameTimings& CommandTimer::timings(const Device& device)
         if (!chunk->isSlotComplete(slot, device))
             return latest;
 
-    auto milliseconds =
-        std::vector<double>((std::size_t) GpuTimestamps::maxTimedPasses);
+    // On the heap: a set of samples holds maxTimedPasses passes, more than a
+    // worker thread's stack should carry three arrays of.
+    auto passes = (std::size_t) GpuTimestamps::maxTimedPasses;
+    auto activity = std::vector<PassActivity>(passes);
+    auto shares = std::vector<double>(passes);
+    auto spans = std::vector<double>(passes);
     latest.passes.resize(passCount);
 
+    // Shares are divided within a set of samples: the sets follow one another
+    // through the command buffer, so a pass overlaps only passes of its own set.
     for (auto chunk = 0; chunk < (int) chunks.size(); ++chunk)
     {
         auto count = passesIn(chunk);
+        std::fill(activity.begin(), activity.end(), PassActivity {});
+
         auto total = chunks[(std::size_t) chunk]->resolveSlot(
-            slot, count, milliseconds.data());
+            slot, count, activity.data());
+        sharePassTimes<GpuTimestamps::maxTimedPasses>(
+            activity.data(), count, shares.data(), spans.data());
 
         if (chunk == 0)
             latest.milliseconds = total;
@@ -83,7 +94,8 @@ const FrameTimings& CommandTimer::timings(const Device& device)
         {
             auto index = chunk * GpuTimestamps::maxTimedPasses + pass;
             latest.passes[index].label = labels[index];
-            latest.passes[index].milliseconds = milliseconds[(std::size_t) pass];
+            latest.passes[index].milliseconds = shares[(std::size_t) pass];
+            latest.passes[index].spanMilliseconds = spans[(std::size_t) pass];
         }
     }
 

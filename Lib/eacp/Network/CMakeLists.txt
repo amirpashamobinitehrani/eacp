@@ -21,6 +21,9 @@ target_sources(eacp-network PRIVATE
 
 target_link_libraries(eacp-network PUBLIC eacp-core)
 
+target_compile_definitions(eacp-network PRIVATE
+        EACP_VERSION_STRING="${eacp_VERSION}")
+
 if (APPLE)
     target_sources(eacp-network PRIVATE
             HTTP/Http.mm
@@ -37,7 +40,7 @@ if (APPLE)
 elseif (WIN32)
     target_sources(eacp-network PRIVATE
             HTTP/Http-Windows.cpp
-            HTTPServer/HttpServer-Windows.cpp
+            HTTPServer/HttpServer-Threaded.cpp
             IPC/Channel-Windows.cpp
             IPC/Lock-Windows.cpp
             TCP/Connection-Windows.cpp
@@ -46,7 +49,7 @@ elseif (WIN32)
 elseif (ANDROID)
     target_sources(eacp-network PRIVATE
             HTTP/Http-Android.cpp
-            HTTPServer/HttpServer-Linux.cpp
+            HTTPServer/HttpServer-Threaded.cpp
             IPC/Channel-Linux.cpp
             IPC/Channel-Posix.cpp
             IPC/Lock-Posix.cpp
@@ -55,7 +58,7 @@ elseif (ANDROID)
 elseif (UNIX AND NOT APPLE)
     target_sources(eacp-network PRIVATE
             HTTP/Http-Linux.cpp
-            HTTPServer/HttpServer-Linux.cpp
+            HTTPServer/HttpServer-Threaded.cpp
             IPC/Channel-Linux.cpp
             IPC/Channel-Posix.cpp
             IPC/Lock-Posix.cpp
@@ -68,8 +71,6 @@ endif ()
 set_default_target_setting(eacp-network)
 eacp_enable_unity_build(eacp-network)
 add_ide_sources(eacp-network)
-
-find_package(Miro REQUIRED)
 
 add_library(eacp-network-json STATIC)
 

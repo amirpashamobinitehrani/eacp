@@ -1,6 +1,7 @@
 #include "ConnectionInternal.h"
 #include "../Common-Posix.h"
 
+#include <algorithm>
 #include <fcntl.h>
 #include <netdb.h>
 #include <sys/select.h>
@@ -53,12 +54,11 @@ int pendingSocketError(int fd)
 
 void armTimeouts(int fd, Time::MS ioTimeout)
 {
-    if (ioTimeout.count > 0) // otherwise leave the socket blocking forever
-    {
-        auto tv = toTimeval(ioTimeout);
-        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    }
+    // A zero timeval is "block forever" to setsockopt, so clearing a timeout
+    // is the same call as setting one.
+    auto tv = toTimeval(ioTimeout.count > 0 ? ioTimeout : Time::MS {});
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
 #ifdef SO_NOSIGPIPE
     auto on = 1;
@@ -164,6 +164,11 @@ void socketClose(NativeSocket socket) noexcept
         ::close((int) socket);
 }
 
+void socketSetIoTimeout(NativeSocket socket, Time::MS ioTimeout)
+{
+    armTimeouts((int) socket, ioTimeout);
+}
+
 int socketSend(NativeSocket socket, const char* data, int length)
 {
     auto sent = ::send((int) socket, data, (std::size_t) length, sendFlags());
@@ -228,24 +233,69 @@ NativeSocket
     return (NativeSocket) fd;
 }
 
+void socketShutdown(NativeSocket socket) noexcept
+{
+    if (socket != invalidSocket)
+        ::shutdown((int) socket, SHUT_RDWR);
+}
+
+AcceptWaker acceptWakerCreate()
+{
+    int ends[2] = {kInvalidFd, kInvalidFd};
+
+    if (::pipe(ends) != 0)
+        throwErrno("pipe");
+
+    for (auto end: ends)
+        ::fcntl(end, F_SETFD, FD_CLOEXEC);
+
+    ::fcntl(ends[1], F_SETFL, ::fcntl(ends[1], F_GETFL, 0) | O_NONBLOCK);
+    return {(NativeSocket) ends[0], (NativeSocket) ends[1]};
+}
+
+void acceptWakerSignal(const AcceptWaker& waker) noexcept
+{
+    if (waker.signalWith == invalidSocket)
+        return;
+
+    auto byte = char {1};
+    auto written = ::write((int) waker.signalWith, &byte, 1);
+    (void) written;
+}
+
+void acceptWakerClose(AcceptWaker& waker) noexcept
+{
+    socketClose(waker.waitOn);
+    socketClose(waker.signalWith);
+    waker = {};
+}
+
 NativeSocket socketAccept(NativeSocket listenSocket,
+                          const AcceptWaker& waker,
                           Time::MS acceptTimeout,
                           Time::MS ioTimeout,
                           Address& peer)
 {
     auto lfd = (int) listenSocket;
+    auto wfd = (int) waker.waitOn;
 
     auto readable = fd_set {};
     FD_ZERO(&readable);
     FD_SET(lfd, &readable);
 
+    if (wfd != kInvalidFd)
+        FD_SET(wfd, &readable);
+
     auto tv = toTimeval(acceptTimeout);
     auto* deadline = acceptTimeout.count > 0 ? &tv : nullptr; // null = forever
-    auto ready = ::select(lfd + 1, &readable, nullptr, nullptr, deadline);
+    auto ready =
+        ::select(std::max(lfd, wfd) + 1, &readable, nullptr, nullptr, deadline);
     if (ready == 0)
         throw TimeoutError("accept timed out");
     if (ready < 0)
         throwErrno("accept");
+    if (wfd != kInvalidFd && FD_ISSET(wfd, &readable))
+        throw Error("accept interrupted");
 
     auto addr = sockaddr_in {};
     auto length = (socklen_t) sizeof(addr);

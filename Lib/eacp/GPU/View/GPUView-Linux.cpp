@@ -417,8 +417,17 @@ struct GPUView::Native
         info.imageExtent = extent;
         info.imageArrayLayers = 1;
 
-        // Every extra usage bit is one a compositor is allowed to refuse.
+        // Every extra usage bit is one a compositor is allowed to refuse, so
+        // TRANSFER_SRC is asked for only by a readable view and only where
+        // the surface offers it.
         info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+        const auto canTransfer =
+            (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+            != 0;
+
+        if (readableDrawable && canTransfer)
+            info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         info.preTransform = transform;
@@ -440,6 +449,7 @@ struct GPUView::Native
 
         swapchain = created;
         swapchainFormat = format.format;
+        swapchainReadable = readableDrawable && canTransfer;
         swapchainWidth = static_cast<int>(extent.width);
         swapchainHeight = static_cast<int>(extent.height);
         suboptimalIsExpected = transform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
@@ -687,15 +697,22 @@ struct GPUView::Native
     // acquire against a semaphore the first is still waiting on.
     void render()
     {
-        if (rendering || !readyToRender())
-            return;
-
-        rendering = true;
-        renderOneFrame();
-        rendering = false;
+        render([this](Frame& frame) { view.render(frame); });
     }
 
-    void renderOneFrame()
+    bool render(const std::function<void(Frame&)>& draw)
+    {
+        if (rendering || !readyToRender())
+            return false;
+
+        rendering = true;
+        const auto rendered = renderOneFrame(draw);
+        rendering = false;
+
+        return rendered;
+    }
+
+    bool renderOneFrame(const std::function<void(Frame&)>& draw)
     {
         auto& gpu = Device::shared();
         auto& context = getVulkanContext(gpu);
@@ -716,18 +733,18 @@ struct GPUView::Native
         if (acquired == VK_ERROR_DEVICE_LOST)
         {
             noteDeviceLost();
-            return;
+            return false;
         }
 
         // Out of date signalled nothing, so there is nothing to undo.
         if (acquired == VK_ERROR_OUT_OF_DATE_KHR)
         {
             swapchainStale = true;
-            return;
+            return false;
         }
 
         if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR)
-            return;
+            return false;
 
         // Suboptimal did hand over an image and did signal, so dropping the
         // frame here would leave a signalled semaphore behind.
@@ -746,13 +763,14 @@ struct GPUView::Native
         drawable.target = &target;
         drawable.acquired = acquireSemaphores[currentSlot];
         drawable.renderFinished = renderFinished[static_cast<int>(imageIndex)];
+        drawable.readable = swapchainReadable;
 
         // The first one rides on this present; after that it commits itself.
         record.requestFrameCallback();
 
         {
             auto frame = Frame(gpu, &drawable, nullptr, nullptr, surfaceScale());
-            view.render(frame);
+            draw(frame);
         }
 
         reclaimCompanions(target);
@@ -761,6 +779,7 @@ struct GPUView::Native
         currentSlot = (currentSlot + 1) % acquireSemaphores.size();
 
         handlePresentResult(drawable.presentResult);
+        return true;
     }
 
     void handlePresentResult(VkResult result)
@@ -816,6 +835,8 @@ struct GPUView::Native
     int maxFps = 0;
     int framesInFlight = 2;
     bool depthEnabled = false;
+    bool readableDrawable = false;
+    bool swapchainReadable = false;
     bool stencilEnabled = false;
     bool continuous = false;
     bool transparent = false;
@@ -919,6 +940,21 @@ bool GPUView::isContinuous() const
     return impl->continuous;
 }
 
+// A swapchain's usage is fixed at creation, so a change rebuilds it.
+void GPUView::setReadableDrawable(bool readable)
+{
+    if (impl->readableDrawable == readable)
+        return;
+
+    impl->readableDrawable = readable;
+    impl->swapchainStale = true;
+}
+
+bool GPUView::hasReadableDrawable() const
+{
+    return impl->readableDrawable;
+}
+
 void GPUView::setMaxFps(int fps)
 {
     impl->maxFps = fps;
@@ -987,6 +1023,11 @@ void GPUView::paint(Graphics::Context&)
 void GPUView::renderNow()
 {
     impl->render();
+}
+
+bool GPUView::renderFrame(const std::function<void(Frame&)>& draw)
+{
+    return impl->render(draw);
 }
 
 // Touches no swapchain, so this is also what runs headless.

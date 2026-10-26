@@ -20,6 +20,8 @@ using namespace nano;
 using namespace eacp;
 using namespace eacp::GPU;
 
+namespace CommandBufferWaitTests
+{
 namespace
 {
 constexpr auto floatBytes = (int) sizeof(float);
@@ -434,17 +436,14 @@ auto tHostUpdateWinsOverAnInFlightKernel =
 // second one too, which is the overlap a pipelined loop exists for;
 // CommandBuffer::update waits for its own and returns.
 //
-// Both halves are numbers rather than timings. The markers say the write landed
-// after the kernel that was filling those bytes, and the trailing buffer still
-// being incomplete says the wait did not reach past this one - it is several
-// times the work, and it cannot start before this one ends, so it cannot have
-// finished in the time a four-kilobyte memcpy took.
-//
-// "Submitted behind it" alone does not make it start later: Metal runs two
-// command buffers of one queue side by side when nothing links them, and the
-// longer one then finishes first often enough to fail here. So the first buffer
-// also writes trailingOutput, last, and the trailing buffer's writes to it are
-// ordered after that one by the queue's hazard tracking.
+// The markers say the write landed after the kernel that was filling those
+// bytes, and that is a guarantee checked on every attempt. The trailing buffer
+// still being incomplete says the wait did not reach past this one, and that is
+// only likely: it is several times the work, submitted behind it, but nothing
+// stops a loaded machine from descheduling this thread - or a virtualised GPU
+// from reporting the first completion late - for as long as the trailing work
+// takes. So an attempt that finds it finished proves nothing either way and is
+// run again; an update that waited for the queue finds it finished every time.
 auto tScopedUpdateWaitsForOneBufferOnly =
     test("CommandBufferWait/aScopedUpdateWaitsForOneBufferOnly") = []
 {
@@ -456,6 +455,7 @@ auto tScopedUpdateWaitsForOneBufferOnly =
     constexpr auto markerCount = 1 << 10;
     constexpr auto marker = 777.0f;
     constexpr auto trailingPasses = 4;
+    constexpr auto maxAttempts = 8;
 
     auto output = makeOutput(slowElements);
     auto trailingOutput = makeOutput(slowElements);
@@ -468,36 +468,46 @@ auto tScopedUpdateWaitsForOneBufferOnly =
     trailingSlow.output = trailingOutput;
     trailingSlow.prepare();
 
-    auto commands = device.makeCommandBuffer();
-
-    {
-        auto pass = commands.beginCompute();
-        pass.dispatch(slow, slowElements);
-        pass.dispatch(trailingSlow, slowElements);
-    }
-
-    commands.submit();
-
-    auto trailing = device.makeCommandBuffer();
-
-    for (auto pass = 0; pass < trailingPasses; ++pass)
-        dispatchSlowWork(trailing, trailingSlow);
-
-    trailing.submit();
-
     auto markers = Vector<float> {};
     markers.assign(markerCount, marker);
 
-    commands.update(output, markers.data(), (std::int64_t) floatBytes * markerCount);
+    const auto updateFoundTrailingStillRunning = [&]
+    {
+        auto commands = device.makeCommandBuffer();
+        dispatchSlowWork(commands, slow);
+        commands.submit();
 
-    check(commands.isComplete());
-    check(!trailing.isComplete());
+        auto trailing = device.makeCommandBuffer();
 
-    auto values = Vector<float>(markerCount);
-    commands.read(output, values.data(), (std::int64_t) floatBytes * markerCount);
+        for (auto pass = 0; pass < trailingPasses; ++pass)
+            dispatchSlowWork(trailing, trailingSlow);
 
-    for (auto i = 0; i < markerCount; ++i)
-        check(values[i] == marker);
+        trailing.submit();
 
-    trailing.wait();
+        commands.update(
+            output, markers.data(), (std::int64_t) floatBytes * markerCount);
+
+        const auto trailingWasRunning = !trailing.isComplete();
+
+        check(commands.isComplete());
+
+        auto values = Vector<float>(markerCount);
+        commands.read(
+            output, values.data(), (std::int64_t) floatBytes * markerCount);
+
+        for (auto i = 0; i < markerCount; ++i)
+            check(values[i] == marker);
+
+        trailing.wait();
+
+        return trailingWasRunning;
+    };
+
+    auto overlapped = false;
+
+    for (auto attempt = 0; attempt < maxAttempts && !overlapped; ++attempt)
+        overlapped = updateFoundTrailingStillRunning();
+
+    check(overlapped);
 };
+} // namespace CommandBufferWaitTests

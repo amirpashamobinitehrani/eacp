@@ -44,6 +44,14 @@
     return self;
 }
 
+- (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event
+{
+    if (cppView->getProperties().ignoresMouseEvents)
+        return nil;
+
+    return [super hitTest:point withEvent:event];
+}
+
 - (void)drawLayer:(CALayer*)layer inContext:(CGContextRef)ctx
 {
     auto nativeContext = eacp::Graphics::MacOSContext(ctx);
@@ -56,6 +64,36 @@
     [self reportSafeArea];
     cppView->resizeStarted();
     cppView->resized();
+    cppView->resizeFinished();
+}
+
+// The iOS side of AppKit's viewDidChangeBackingProperties. createNativeView
+// seeds the scale from the main screen, which is the right guess for a view
+// going into a window of ours and only a guess for one going into somebody
+// else's (an EmbeddedView's host) or onto another display, so the screen the
+// view has actually landed on gets the last word. It is read off the trait
+// collection rather than through UIApplication or a scene, which an app
+// extension cannot reach.
+- (void)didMoveToWindow
+{
+    [super didMoveToWindow];
+
+    if (self.window == nil)
+        return;
+
+    auto scale = self.traitCollection.displayScale;
+
+    if (scale <= 0.0 || scale == self.contentScaleFactor)
+        return;
+
+    self.contentScaleFactor = scale;
+    self.layer.contentsScale = scale;
+    [self.layer setNeedsDisplay];
+
+    // Anything the C++ side sized in device pixels (a CAMetalLayer's
+    // drawableSize, a glyph atlas) does not follow by itself.
+    cppView->resizeStarted();
+    cppView->backingScaleChanged();
     cppView->resizeFinished();
 }
 
@@ -188,7 +226,7 @@ struct View::Native
 {
     Native(View& view) { nativeView = createNativeView(&view); }
 
-    void repaint() { [nativeView.get() setNeedsDisplay]; }
+    void repaint() { [nativeView.get().layer setNeedsDisplay]; }
 
     void setOpacity(float opacity) { nativeView.get().alpha = opacity; }
 
@@ -300,9 +338,20 @@ Point View::getMousePosition() const
 // Stored and never shown: iOS draws no pointer for a touch. Kept rather than
 // ignored so portable code can set a shape unconditionally, and so an iPad with
 // a trackpad has one obvious place to grow a real implementation.
-void View::setMouseCursor(MouseCursor cursor)
+void View::setMouseCursor(const MouseCursor& cursor)
 {
     currentCursor = cursor;
+}
+
+View& View::setAcceptsFileDrops(bool value)
+{
+    properties.acceptsFileDrops = value;
+    return *this;
+}
+
+bool View::startFileDrag(const Vector<std::string>&, const FileDragOptions&)
+{
+    return false;
 }
 
 void View::focus()

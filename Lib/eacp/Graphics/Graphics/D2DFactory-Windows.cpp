@@ -1,6 +1,3 @@
-#include <cstdio>
-#include <string>
-
 #include "../DComp-Windows.h"
 
 #include "../Common.h"
@@ -99,9 +96,9 @@ private:
     {
         if (auto hr = createRenderingStack(); FAILED(hr))
         {
-            LOG("DCompCompositor: Direct2D init failed (hr=",
-                hexCode(hr),
-                "); there is no drawing of any kind on this device.");
+            LOGF("DCompCompositor: Direct2D init failed (hr=0x{:08x}); there is no "
+                 "drawing of any kind on this device.",
+                 static_cast<unsigned long>(hr));
 
             releaseAll();
             return;
@@ -122,11 +119,11 @@ private:
         // now answers with a device that works.
         if (auto hr = createCompositionDevice(); FAILED(hr))
         {
-            LOG("DCompCompositor: composition device init failed (hr=",
-                hexCode(hr),
-                "); GPU compositing unavailable, off-screen rendering still "
-                "works. Expected on headless sessions and plugin hosts "
-                "without an accessible desktop compositor.");
+            LOGF("DCompCompositor: composition device init failed (hr=0x{:08x}); "
+                 "GPU compositing unavailable, off-screen rendering still works. "
+                 "Expected on headless sessions and plugin hosts without an "
+                 "accessible desktop compositor.",
+                 static_cast<unsigned long>(hr));
 
             device.Reset();
             return;
@@ -136,14 +133,6 @@ private:
     }
 
     ~DCompCompositor() { releaseAll(); }
-
-    static std::string hexCode(HRESULT hr)
-    {
-        char code[16];
-        std::snprintf(code, sizeof code, "0x%08lx", (unsigned long) hr);
-
-        return code;
-    }
 
     // Everything but the compositor: the two factories and the device the
     // drawing itself goes through.

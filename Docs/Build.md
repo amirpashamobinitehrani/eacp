@@ -5,6 +5,12 @@ the two commands a build needs; this page is everything behind them: the
 dependencies, every option, the capability variables that decide which
 modules a platform gets, the pieces that build everywhere, and how CI runs.
 
+After cloning, run `git config core.hooksPath .githooks` once. It turns on
+the repository's two hooks: `pre-commit` refuses a commit whose author or
+committer names Claude or Anthropic, and `commit-msg` refuses a message with a
+`Co-Authored-By` trailer for either, an `@anthropic.com` address or a
+"Generated with Claude" line.
+
 ## Dependencies
 
 Dependencies are fetched by [CPM](https://github.com/cpm-cmake/CPM.cmake) at
@@ -29,12 +35,22 @@ false. The package names are in [Linux.md](Linux.md). An Android build
 fetches nothing more and needs no libcurl: its HTTP and WebSocket clients are
 Java's own, reached through JNI.
 
-One dependency is carried in the tree instead: `ThirdParty/miniz`, the
-amalgamated miniz 3.1.2 pair beside its MIT license, built as its own C
+Two dependencies are carried in the tree instead. One is `ThirdParty/miniz`,
+the amalgamated miniz 3.1.2 pair beside its MIT license, built as its own C
 target so it never joins a unity build and its warnings are silenced. Only
 `eacp-core` links it, PRIVATE, and only `Utils/Zip.cpp` includes its header,
 so the whole of it is reached through `eacp::Zip`. To update it, replace the
 files under `ThirdParty/miniz` and the version in its README.
+
+The other, `ThirdParty/fmt`, is carried the same way: fmt 12.2.0's
+`include/fmt` headers and `src/format.cc` alone, unmodified, beside its MIT
+license, built as its own static C++ target with its warnings silenced. Only
+`eacp-core` links it, PRIVATE, so no eacp header may include it, and only
+`Utils/Format.cpp` does, behind `eacp::Strings::format`. fmt's `base.h`
+requires `/utf-8` on MSVC of every translation unit that includes it, so the
+fmt target sets the flag PRIVATE on its own `format.cc` and `eacp-core` sets it
+on `Format.cpp` alone. To update it, replace those files and the version in
+its README.
 
 ## Options
 
@@ -45,6 +61,31 @@ files under `ThirdParty/miniz` and the version in its README.
   `-DEACP_UNITY_BUILD=OFF` explicitly when reconfiguring a build directory
   that may have cached `ON`.
 
+- `EACP_UNITY_BUILD_TESTS` (default `OFF`) — compiles the test executables
+  under `Tests/` as unity builds. The tests are many small sources that each
+  parse the same headers, so this is where unity pays most: a clean build of
+  the tests dropped from 253 s to 76 s of CPU time when measured, about 2.4
+  times faster on the wall clock, while an incremental edit to one test source
+  costs 0.4 s more. It is off by default for the same `compile_commands.json`
+  reason as `EACP_UNITY_BUILD`, and `EACP_CI_BUILD` forces it on.
+
+  A unity batch is one translation unit, so every file-local name in a test
+  source — the helpers in its anonymous namespace, its `using` aliases and its
+  `t…` registrations — must be unique within its target, not just within its
+  file. Helpers several sources share live in the directory's `Common.h` or a
+  header beside it; a source whose own helpers would collide wraps its body in
+  a namespace named after the file (`namespace MipmapTests { ... }`), with any
+  `EACP_SHADER_VALUE` closing the namespace around it and naming the type
+  qualified. The platform-only sources (`-Linux`, `-Windows`, `-Android`,
+  `-iOS`) are unity-built only on their own lanes, so a collision there shows
+  up in CI rather than locally. A batch size of 0 puts each target in a single
+  translation unit and shows every collision at once:
+
+  ```bash
+  cmake -G Ninja -B build-unity -DCMAKE_BUILD_TYPE=Debug -DEACP_UNITY_BUILD=OFF \
+        -DEACP_UNITY_BUILD_TESTS=ON -DCMAKE_UNITY_BUILD_BATCH_SIZE=0
+  ```
+
 - `EACP_BUILD_GRAPHICS` (default `ON`) — builds the whole drawing half. Turn it
   off to build only the portable modules, on any platform. It is the only
   switch that leaves the Linux backend out; there is no Linux-specific one.
@@ -53,20 +94,22 @@ files under `ThirdParty/miniz` and the version in its README.
   where the platform has one.
 
 - `EACP_CI_BUILD` (default `OFF`) — the single switch that reproduces CI's
-  exact configuration locally. It forces `EACP_UNITY_BUILD` and
-  `MIRO_UNITY_BUILD` on and turns on `EACP_PCH`. Because it turns unity on, it
-  is for reproducing CI, not for LSP-backed development.
+  exact configuration locally. It forces `EACP_UNITY_BUILD`,
+  `EACP_UNITY_BUILD_TESTS`, `MIRO_UNITY_BUILD` and `ESIMD_UNITY_BUILD` on.
+  Because it turns unity on, it is for reproducing CI, not for LSP-backed
+  development.
 
   ```bash
-  cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Debug -DEACP_CI_BUILD=ON
+  cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DEACP_CI_BUILD=ON
   ```
 
-- `EACP_PCH` (default `OFF`, on under `EACP_CI_BUILD`) — shares one
-  precompiled header, the STL, across every eacp target, which is worth
-  roughly a third of the compile time of a typical translation unit. It holds
-  no eacp header on purpose, but editing `CMake/Pch.h` still rebuilds the
-  project, so it is off for normal work and on in CI, where every build is
-  cold anyway. `<windows.h>` is deliberately not in it: CMake builds a PCH
+- `EACP_PCH` (default `OFF`) — shares one precompiled header, the STL,
+  across every eacp target, which is worth roughly a third of the compile
+  time of a typical translation unit. It holds no eacp header on purpose, but
+  editing `CMake/Pch.h` still rebuilds the project, so it is off for normal
+  work; CI leaves it off too, since its compiler cache (below) cannot cache
+  MSVC's precompiled headers and a cache hit saves the whole compile where the
+  image saved a third. `<windows.h>` is deliberately not in it: CMake builds a PCH
   with `/FI`, so the payload is force-included into every translation unit,
   and windows.h brings two dozen macros with it — `near` and `far` among them,
   which collide with ordinary member names. Measured, it saves a portable TU
@@ -90,6 +133,48 @@ files under `ThirdParty/miniz` and the version in its README.
   server instead (`npm run dev` in the app's `web/` dir); the runtime already
   prefers a reachable dev server (`Options::Embedded::preferDevServer`).
   Schema codegen still emits TS into `web/src/generated` on every app build.
+
+- `EACP_HOT_RELOAD` (default `OFF`) — dev or static mode for every app wired
+  with `eacp_add_hot_reload(<app> MODULE <module> SOURCES <files...>
+  [HOT_RELOAD ON|OFF])` that names no mode of its own. An app's `HOT_RELOAD`
+  wins over the option either way; `Apps/UI/HotReload` names none, so it is
+  in dev mode exactly when `-DEACP_HOT_RELOAD=ON` is given. iOS, Android and
+  Windows are always off, whatever either says. The sources are
+  compiled into the app either way, as generation 0; dev mode adds the
+  reloadable module and a `Plugins::HotReloadLoop` (a `Files::SourceWatcher`
+  on the source directory, a build runner and the reloadable library, with
+  the build-failure summary and status text; an image without the app's
+  `requiredSymbol` is refused and the previous generation kept), static mode
+  adds nothing, so the example is that loop plus one layout function.
+  `Apps/GPU/HotReload` (`HotReloadGPU`) is the other half: its module
+  exports a factory that makes a `GPUView` defined in the module, the host
+  owns it, and each reload destroys it inside `onReloaded` (the previous
+  image is still mapped then, its unmap being deferred a loop turn) and asks
+  the fresh image for a new one, so an object whose code lives in the module
+  is created and dropped once per generation. The module links
+  nothing: its eacp references stay undefined
+  (`-undefined dynamic_lookup` on Apple, the default for a Linux module) and
+  bind at load time to the eacp the app exports, so both share one eacp and
+  the module's one `extern "C"` entry point (`EACP_HOT_RELOAD_EXPORT`, empty
+  on Windows) takes and calls C++ types. Dev
+  mode builds the app with `ENABLE_EXPORTS` (`-export_dynamic` on Apple,
+  `--export-dynamic` on Linux, which is what keeps the exports alive under
+  the libraries' Release IPO) and links every static library in its link
+  closure whole-archive, so the module can call eacp code the app itself
+  never does. It also compiles every eacp library in that closure at default
+  visibility, a property of those library targets and so of the whole build
+  directory: `eacp_add_plugin` modules built there re-export eacp and lose
+  their isolation, so the two should not be mixed in one build directory.
+  A save rebuilds the module alone, never the running app. Windows is not
+  supported: `WINDOWS_EXPORT_ALL_SYMBOLS` never exports a static library's
+  symbols, and a module linking the exe would relink a locked exe on every
+  save. The module owns nothing: it installs no callbacks and keeps no state,
+  and anything it creates is handed to the host, which destroys it no later
+  than the `onReloaded` of the next generation, since the image is unmapped
+  one loop turn after that reload.
+  The host branches on `Plugins::isHotReload()` (`Core/Plugins/HotReload.h`,
+  included directly rather than through the `Core.h` umbrella, since its
+  contents depend on the app's compile definitions), and a configure prints `<app>: hot reload ON/OFF`.
 
 - `EACP_VERBOSE_CONFIGURE` (default `OFF`) — prints the configure detail a
   clean configure leaves out: the FetchContent population of the
@@ -257,6 +342,11 @@ The generated template lands in the target's binary directory as
 included, so a project that fetches eacp reads them without running
 `eacp_default_setup()`.
 
+The deployment floors are macOS 11.0 and iOS 15.0, Xcode 27's simulator
+floor. `CMake/AppleSetup.cmake` claims `CMAKE_OSX_DEPLOYMENT_TARGET` only
+when nothing has filled it, so `-DCMAKE_OSX_DEPLOYMENT_TARGET=...` on the
+command line wins on both.
+
 ## Capability variables
 
 The top-level `CMakeLists.txt` decides this once, in seven capability variables
@@ -324,7 +414,37 @@ and Android: an Ubuntu lane installs a pinned NDK with `sdkmanager`, configures
 against it with `-DCMAKE_SYSTEM_NAME=Android` and builds `HelloGPU` and
 `HelloNetwork` for `arm64-v8a`, which is every module an Android app links,
 the network backend included, then configures once
-more with no NDK named, which exercises the newest-installed path. Every lane configures with `EACP_CI_BUILD=ON`.
+more with no NDK named, which exercises the newest-installed path. The two
+Windows ARM64 lanes pass `-DEACP_BUILD_WEBVIEW=OFF`: the WebView example apps
+run their npm installs inside configure, several times slower on the ARM
+runners, and the x64 lanes cover the WebView2 backend. Every lane
+configures with `EACP_CI_BUILD=ON` and builds `RelWithDebInfo`: the tests run
+optimized code, as a shipped build does, while the link-time optimization
+eacp's targets take under `Release` stays off — it roughly tripled the macOS
+and MSVC build steps for a few seconds of test time. The `NDEBUG`-only paths —
+the D3D12 debug layer, `Device::assertOwningThread`, the Android JNI
+local-reference check — are exercised by a local Debug build, not by CI.
+
+Every lane of the build matrix compiles through [ccache](https://ccache.dev)
+(`hendrikmuhs/ccache-action`, which installs it and keeps its directory in the
+Actions cache under one key per compiler and architecture; the two Linux Clang
+lanes compile identical objects and share one). A translation unit whose
+preprocessed text, compiler and flags match an earlier run is restored rather
+than compiled, which is every third-party object on every run — glslang, Miro,
+NanoTest's generated registrations — and most of eacp's own on a change that
+stays inside one module; under the unity build a batch misses as a whole when
+any file in it changed. It runs in depend mode (`CCACHE_DEPEND`), hashing the
+include files the compiler's own dependency output names rather than running
+the preprocessor a second time, so a miss costs the compile and nothing more.
+Each lane's cache is capped at 1 GB and trimmed after
+the build to what that build touched, so the eight stay inside the repository's
+10 GB. Two configure flags go with it: the Windows lanes pass
+`-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded` (`/Z7`), because the default
+`/Zi` writes one PDB per target that every translation unit appends to, which
+no per-object cache can restore, and `EACP_PCH` stays off (see above). CPM's
+sources are not cached: every dependency but glslang and the Vulkan trio is
+pinned to `main`, and a cached checkout of a moving branch is never
+re-fetched.
 
 The Linux lanes install the packages listed in [Linux.md](Linux.md), and the
 `Dockerfile` reproduces their three steps — a headless build, the suite under
@@ -338,13 +458,21 @@ docker run --rm -e EACP_HEADLESS=1 -e EACP_REQUIRE_GPU=1 -e EACP_VK_SOFTWARE=1 \
 docker run --rm -e EACP_REQUIRE_GPU=1 -e EACP_VK_SOFTWARE=1 -e EACP_REQUIRE_DISPLAY=1 \
     -e EACP_REQUIRE_FONTS=1 -v "$PWD":/workspace eacp-ci-linux \
     with-weston ctest --test-dir build-ci-linux --output-on-failure \
-    -E '^(X11|EmbeddedView)/'
+    -E '^(X11|EmbeddedView)(/|$)'
 
 docker run --rm -e EACP_REQUIRE_GPU=1 -e EACP_VK_SOFTWARE=1 -e EACP_REQUIRE_DISPLAY=1 \
     -v "$PWD":/workspace eacp-ci-linux \
     with-xvfb ctest --test-dir build-ci-linux --output-on-failure \
-    -R '^(X11|EmbeddedView|Present)/'
+    -R '^(X11|EmbeddedView|Present)(/|$)'
 ```
+
+A ctest entry is a group, not a case: `Tests/CMakeLists.txt` sets
+`NANO_TEST_GROUP_BY PREFIX`, so every case named `X11/...` runs in the one
+process behind the entry `X11`, and a filter names the group, as `^X11$` does.
+One case runs on its own through its binary, `X11WindowTests --test
+X11/windowComesUpAtItsConfiguredSize`, and one group through `ctest -R '^X11$'`. The groups that
+share a display or the clipboard take a `RESOURCE_LOCK` by group name, set in
+the `TEST_INCLUDE_FILES` of their test directories.
 
 The environment variables those commands set — `EACP_VK_SOFTWARE`,
 `EACP_REQUIRE_GPU`, `EACP_REQUIRE_DISPLAY`, `EACP_REQUIRE_FONTS`,

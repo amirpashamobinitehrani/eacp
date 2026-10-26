@@ -7,6 +7,11 @@ bool FrameTimer::isSupported() const
     return timestamps.isSupported();
 }
 
+const FrameTimings& FrameTimer::lastTimings() const
+{
+    return latest;
+}
+
 void FrameTimer::beginFrame(std::uint64_t frameIndex, Device& device)
 {
     // Before the new frame takes a slot, so that the one it is about to take is
@@ -35,7 +40,7 @@ void FrameTimer::beginFrame(std::uint64_t frameIndex, Device& device)
 
 int FrameTimer::beginPass(std::string_view label)
 {
-    if (current < 0 || label.empty() || !timestamps.isSupported())
+    if (current < 0 || (label.empty() && scope.empty()) || !timestamps.isSupported())
         return -1;
 
     if (passCount >= GpuTimestamps::maxTimedPasses)
@@ -46,9 +51,38 @@ int FrameTimer::beginPass(std::string_view label)
     if (labels.size() <= passCount)
         labels.resize(passCount + 1);
 
-    labels[passCount].assign(label);
+    auto& name = labels[passCount];
+
+    if (scope.empty())
+        name.assign(label);
+    else
+    {
+        name.assign(scope);
+
+        if (!label.empty())
+            name.append("/").append(label);
+    }
 
     return passCount++;
+}
+
+std::string_view FrameTimer::setScope(std::string_view scopeToUse)
+{
+    auto previous = scope;
+    scope = scopeToUse;
+    return previous;
+}
+
+int FrameTimer::suspend()
+{
+    const auto slot = current;
+    current = -1;
+    return slot;
+}
+
+void FrameTimer::resume(int slot)
+{
+    current = slot;
 }
 
 void FrameTimer::beginRecording(void* nativeCommandBuffer)
@@ -91,9 +125,9 @@ void FrameTimer::drainCompleted(const Device& device)
         if (!entry.pending || !timestamps.isSlotComplete(slot, device))
             continue;
 
-        double milliseconds[GpuTimestamps::maxTimedPasses] = {};
+        PassActivity activity[GpuTimestamps::maxTimedPasses] = {};
         const auto frameTime =
-            timestamps.resolveSlot(slot, entry.passCount, milliseconds);
+            timestamps.resolveSlot(slot, entry.passCount, activity);
 
         entry.pending = false;
 
@@ -104,6 +138,11 @@ void FrameTimer::drainCompleted(const Device& device)
         if (entry.frameIndex < latest.frameIndex)
             continue;
 
+        double shares[GpuTimestamps::maxTimedPasses] = {};
+        double spans[GpuTimestamps::maxTimedPasses] = {};
+        sharePassTimes<GpuTimestamps::maxTimedPasses>(
+            activity, entry.passCount, shares, spans);
+
         latest.frameIndex = entry.frameIndex;
         latest.milliseconds = frameTime;
         latest.passes.resize(entry.passCount);
@@ -111,7 +150,8 @@ void FrameTimer::drainCompleted(const Device& device)
         for (auto pass = 0; pass < entry.passCount; ++pass)
         {
             latest.passes[pass].label = entry.labels[pass];
-            latest.passes[pass].milliseconds = milliseconds[pass];
+            latest.passes[pass].milliseconds = shares[pass];
+            latest.passes[pass].spanMilliseconds = spans[pass];
         }
     }
 }

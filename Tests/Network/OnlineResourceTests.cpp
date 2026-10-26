@@ -18,29 +18,9 @@ using eacp::HTTP::ServerThreadingMode;
 
 namespace
 {
-constexpr auto fetchTimeout = eacp::Time::MS {5000};
-
-std::string baseUrl(int port)
-{
-    return "http://127.0.0.1:" + std::to_string(port);
-}
-
-FilePath scratchDirectory(const std::string& name)
-{
-    auto path = std::filesystem::temp_directory_path() / ("eacp-resource-" + name);
-    auto ignored = std::error_code {};
-    std::filesystem::remove_all(path, ignored);
-    return FilePath {path};
-}
-
 std::string readAll(const FilePath& path)
 {
     return eacp::Files::readFile(path);
-}
-
-bool exists(const FilePath& path)
-{
-    return std::filesystem::exists(eacp::toStdPath(path));
 }
 
 int entriesIn(const FilePath& directory)
@@ -144,7 +124,7 @@ auto tFileNameFromUrl = test("OnlineResource/fileNameDefaultsToUrlLastSegment") 
 auto tDownloadsAFile = test("OnlineResource/downloadsAndRecordsAFile") = []
 {
     auto server = StaticFileServer {std::string(4096, 'x'), "\"v1\""};
-    auto directory = scratchDirectory("download");
+    auto directory = scratchDirectory("resource-download");
 
     auto resource = OnlineResource {{"Data", server.url("data.bin")}, directory};
     check(!resource.isAvailable());
@@ -195,7 +175,7 @@ auto tUnpacksAZip = test("OnlineResource/unpacksAZipIntoAFolder") = []
     auto archive = writer.finish();
 
     auto server = StaticFileServer {std::string(archive.begin(), archive.end())};
-    auto directory = scratchDirectory("zip");
+    auto directory = scratchDirectory("resource-zip");
 
     auto resource = OnlineResource {{"Pack", server.url("pack.zip")}, directory};
     auto result = fetchNow(resource);
@@ -213,7 +193,7 @@ auto tUnpacksAZip = test("OnlineResource/unpacksAZipIntoAFolder") = []
 auto tCorruptZipFails = test("OnlineResource/aCorruptZipFailsAndLeavesNothing") = []
 {
     auto server = StaticFileServer {"this is not a zip"};
-    auto directory = scratchDirectory("badzip");
+    auto directory = scratchDirectory("resource-badzip");
 
     auto resource = OnlineResource {{"Pack", server.url("pack.zip")}, directory};
     auto result = fetchNow(resource);
@@ -227,7 +207,7 @@ auto tCorruptZipFails = test("OnlineResource/aCorruptZipFailsAndLeavesNothing") 
 auto tRevalidates = test("OnlineResource/revalidatesWithETagAndKeepsCopyOn304") = []
 {
     auto server = StaticFileServer {"first", "\"v1\""};
-    auto directory = scratchDirectory("etag");
+    auto directory = scratchDirectory("resource-etag");
 
     auto resource = OnlineResource {{"Data", server.url("data.txt")}, directory};
     check(fetchNow(resource).downloaded);
@@ -254,7 +234,7 @@ auto tRevalidates = test("OnlineResource/revalidatesWithETagAndKeepsCopyOn304") 
 auto tTrustSkipsServer = test("OnlineResource/trustNeverAsksTheServerAgain") = []
 {
     auto server = StaticFileServer {"first", "\"v1\""};
-    auto directory = scratchDirectory("trust");
+    auto directory = scratchDirectory("resource-trust");
 
     auto resource = OnlineResource {{"Data", server.url("data.txt")},
                                     directory,
@@ -271,7 +251,7 @@ auto tTrustSkipsServer = test("OnlineResource/trustNeverAsksTheServerAgain") = [
 auto tNoValidators = test("OnlineResource/noValidatorsMeansNoSecondRequest") = []
 {
     auto server = StaticFileServer {"first"};
-    auto directory = scratchDirectory("novalidators");
+    auto directory = scratchDirectory("resource-novalidators");
 
     auto resource = OnlineResource {{"Data", server.url("data.txt")}, directory};
     check(fetchNow(resource).downloaded);
@@ -285,7 +265,7 @@ auto tNoValidators = test("OnlineResource/noValidatorsMeansNoSecondRequest") = [
 auto tVersionBump = test("OnlineResource/aVersionBumpRedownloadsWithoutAsking") = []
 {
     auto server = StaticFileServer {"first", "\"v1\""};
-    auto directory = scratchDirectory("version");
+    auto directory = scratchDirectory("resource-version");
 
     {
         auto info = OnlineResource::Info {"Data", server.url("data.txt")};
@@ -310,7 +290,7 @@ auto tVersionBump = test("OnlineResource/aVersionBumpRedownloadsWithoutAsking") 
 auto tUrlChange = test("OnlineResource/aDifferentUrlToTheSameFileRedownloads") = []
 {
     auto server = StaticFileServer {"first", "\"v1\""};
-    auto directory = scratchDirectory("url");
+    auto directory = scratchDirectory("resource-url");
 
     {
         auto resource =
@@ -327,7 +307,7 @@ auto tUrlChange = test("OnlineResource/aDifferentUrlToTheSameFileRedownloads") =
 auto tMissingSidecar = test("OnlineResource/aCopyWithoutASidecarIsReplaced") = []
 {
     auto server = StaticFileServer {"fresh"};
-    auto directory = scratchDirectory("nosidecar");
+    auto directory = scratchDirectory("resource-nosidecar");
 
     std::filesystem::create_directories(eacp::toStdPath(directory));
     auto stale = std::string {"stale"};
@@ -355,7 +335,7 @@ auto tHttpError = test("OnlineResource/anHttpErrorLeavesNothingBehind") = []
                             return response;
                         }));
 
-    auto directory = scratchDirectory("404");
+    auto directory = scratchDirectory("resource-404");
     auto resource = OnlineResource {
         {"Data", baseUrl(server.boundPort()) + "/missing.bin"}, directory};
 
@@ -372,7 +352,7 @@ auto tHttpError = test("OnlineResource/anHttpErrorLeavesNothingBehind") = []
 auto tCancel = test("OnlineResource/cancelResolvesCancelledWithNoFile") = []
 {
     auto server = StaticFileServer {std::string(1 << 20, 'z')};
-    auto directory = scratchDirectory("cancel");
+    auto directory = scratchDirectory("resource-cancel");
 
     auto resource = OnlineResource {{"Data", server.url("big.bin")}, directory};
     auto pending = resource.start();
@@ -392,7 +372,7 @@ auto tSecondFetchRefused =
     test("OnlineResource/aSecondFetchWhileInFlightIsRefused") = []
 {
     auto server = StaticFileServer {std::string(1 << 20, 'z')};
-    auto directory = scratchDirectory("twice");
+    auto directory = scratchDirectory("resource-twice");
 
     auto resource = OnlineResource {{"Data", server.url("big.bin")}, directory};
     auto first = resource.start();
@@ -421,7 +401,7 @@ auto tDestroyedMidFetch = test("OnlineResource/destroyingMidFetchNeverResolves")
                             return okResponse("late");
                         }));
 
-    auto directory = scratchDirectory("destroyed");
+    auto directory = scratchDirectory("resource-destroyed");
     auto resource = std::make_unique<OnlineResource>(
         OnlineResource::Info {"Data", baseUrl(server.boundPort()) + "/late.txt"},
         directory);
@@ -431,7 +411,14 @@ auto tDestroyedMidFetch = test("OnlineResource/destroyingMidFetchNeverResolves")
     resource.reset();
     gate.release();
 
-    eacp::Threads::runEventLoopFor(eacp::Time::MS {300});
+    auto barrierArrived = false;
+    auto onBarrier = [&](const eacp::HTTP::Response&) { barrierArrived = true; };
+    eacp::HTTP::asyncRequest(Request(baseUrl(server.boundPort()) + "/after"),
+                             onBarrier);
+
+    auto arrived = [&] { return barrierArrived; };
+    check(eacp::Threads::runEventLoopUntil(arrived, eacp::Time::MS {5000}));
+    eacp::Threads::runEventLoopFor(eacp::Time::MS {20});
     check(!resolved);
 
     server.stop();
@@ -440,7 +427,7 @@ auto tDestroyedMidFetch = test("OnlineResource/destroyingMidFetchNeverResolves")
 auto tFetchAsync = test("OnlineResource/fetchAsyncOwnsTheObjectAndCallsBack") = []
 {
     auto server = StaticFileServer {std::string(65536, 'a'), "\"v1\""};
-    auto directory = scratchDirectory("async");
+    auto directory = scratchDirectory("resource-async");
 
     auto progressCalls = 0;
     auto lastStage = OnlineResource::Progress::Stage::idle;
@@ -473,7 +460,7 @@ auto tFetchAsync = test("OnlineResource/fetchAsyncOwnsTheObjectAndCallsBack") = 
 auto tFetchBlocking = test("OnlineResource/fetchBlocksUntilTheResourceIsOnDisk") = []
 {
     auto server = StaticFileServer {"blocking", "\"v1\""};
-    auto directory = scratchDirectory("blocking");
+    auto directory = scratchDirectory("resource-blocking");
 
     auto finishedBeforeReturn = false;
 
@@ -514,7 +501,7 @@ auto tFetchTimesOut = test("OnlineResource/fetchThrowsAfterItsTimeout") = []
     auto options = OnlineResource::Options {};
     options.info.name = "Late";
     options.info.url = baseUrl(server.boundPort()) + "/late.txt";
-    options.directory = scratchDirectory("timeout");
+    options.directory = scratchDirectory("resource-timeout");
     options.info.timeout = eacp::Time::MS {100};
 
     auto finished = std::optional<OnlineResource::Result> {};
@@ -560,7 +547,7 @@ auto tFetchThrowsOnFailure =
 
     auto options = OnlineResource::Options {};
     options.info.url = baseUrl(server.boundPort()) + "/missing.bin";
-    options.directory = scratchDirectory("throws");
+    options.directory = scratchDirectory("resource-throws");
 
     auto message = std::string {};
 
@@ -582,7 +569,7 @@ auto tFetchThrowsOnFailure =
 auto tRemove = test("OnlineResource/removeDeletesCopyAndSidecar") = []
 {
     auto server = StaticFileServer {"data", "\"v1\""};
-    auto directory = scratchDirectory("remove");
+    auto directory = scratchDirectory("resource-remove");
 
     auto resource = OnlineResource {{"Data", server.url("data.txt")}, directory};
     check(fetchNow(resource).ok);
