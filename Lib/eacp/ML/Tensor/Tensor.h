@@ -55,8 +55,9 @@ public:
                                     std::vector<int> shape,
                                     GPU::Device& device = GPU::Device::shared());
 
-    // Storage from GPU::BufferPool, so its contents are whatever the last
-    // owner left, not zeros. ML::zeros (TensorOps.h) is the one that does.
+    // Contents undefined, not zeros: the storage may be a StorageReuse
+    // scope's, holding whatever its last tensor left. Compute::zeros
+    // (TensorOps.h) is the one that clears.
     static Tensor uninitializedF32(std::vector<int> shape,
                                    GPU::Device& device = GPU::Device::shared());
 
