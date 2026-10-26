@@ -28,6 +28,7 @@ target_sources(eacp-core PRIVATE
         Platform/Platform.cpp
         Plugins/DynamicLibrary.cpp
         Plugins/HotReloadLoop.cpp
+        Plugins/Reloadable.cpp
         Plugins/ReloadableLibrary.cpp
         Process/BuildRunner.cpp
         Process/Process.cpp

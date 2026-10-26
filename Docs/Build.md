@@ -137,44 +137,10 @@ its README.
 - `EACP_HOT_RELOAD` (default `OFF`) — dev or static mode for every app wired
   with `eacp_add_hot_reload(<app> MODULE <module> SOURCES <files...>
   [HOT_RELOAD ON|OFF])` that names no mode of its own. An app's `HOT_RELOAD`
-  wins over the option either way; `Apps/UI/HotReload` names none, so it is
-  in dev mode exactly when `-DEACP_HOT_RELOAD=ON` is given. iOS, Android and
-  Windows are always off, whatever either says. The sources are
-  compiled into the app either way, as generation 0; dev mode adds the
-  reloadable module and a `Plugins::HotReloadLoop` (a `Files::SourceWatcher`
-  on the source directory, a build runner and the reloadable library, with
-  the build-failure summary and status text; an image without the app's
-  `requiredSymbol` is refused and the previous generation kept), static mode
-  adds nothing, so the example is that loop plus one layout function.
-  `Apps/GPU/HotReload` (`HotReloadGPU`) is the other half: its module
-  exports a factory that makes a `GPUView` defined in the module, the host
-  owns it, and each reload destroys it inside `onReloaded` (the previous
-  image is still mapped then, its unmap being deferred a loop turn) and asks
-  the fresh image for a new one, so an object whose code lives in the module
-  is created and dropped once per generation. The module links
-  nothing: its eacp references stay undefined
-  (`-undefined dynamic_lookup` on Apple, the default for a Linux module) and
-  bind at load time to the eacp the app exports, so both share one eacp and
-  the module's one `extern "C"` entry point (`EACP_HOT_RELOAD_EXPORT`, empty
-  on Windows) takes and calls C++ types. Dev
-  mode builds the app with `ENABLE_EXPORTS` (`-export_dynamic` on Apple,
-  `--export-dynamic` on Linux, which is what keeps the exports alive under
-  the libraries' Release IPO) and links every static library in its link
-  closure whole-archive, so the module can call eacp code the app itself
-  never does. It also compiles every eacp library in that closure at default
-  visibility, a property of those library targets and so of the whole build
-  directory: `eacp_add_plugin` modules built there re-export eacp and lose
-  their isolation, so the two should not be mixed in one build directory.
-  A save rebuilds the module alone, never the running app. Windows is not
-  supported: `WINDOWS_EXPORT_ALL_SYMBOLS` never exports a static library's
-  symbols, and a module linking the exe would relink a locked exe on every
-  save. The module owns nothing: it installs no callbacks and keeps no state,
-  and anything it creates is handed to the host, which destroys it no later
-  than the `onReloaded` of the next generation, since the image is unmapped
-  one loop turn after that reload.
-  The host branches on `Plugins::isHotReload()` (`Core/Plugins/HotReload.h`,
-  included directly rather than through the `Core.h` umbrella, since its
-  contents depend on the app's compile definitions), and a configure prints `<app>: hot reload ON/OFF`.
+  wins over the option either way, and both in-tree examples pass `ON`.
+  iOS, Android and Windows are always static. A configure prints
+  `<app>: hot reload ON/OFF`. What each mode builds, the module rules and
+  `Plugins::Reloadable` are in [HotReload.md](HotReload.md).
 
 - `EACP_VERBOSE_CONFIGURE` (default `OFF`) — prints the configure detail a
   clean configure leaves out: the FetchContent population of the

@@ -126,7 +126,8 @@ explains how a frame is built.
 - **Processes** — a child with args, env, stdin and captured output, and a
   build runner that reruns one command on demand.
 - **Plugins and hot reload** — shared libraries loaded at runtime, and a
-  source tree watched, rebuilt on save and reloaded into the running app.
+  function or object rebuilt on save and swapped into the running app
+  ([`Docs/HotReload.md`](Docs/HotReload.md)).
 - **Networking** — an HTTP client with redirects, timeouts and resumable
   downloads, an HTTP server, WebSocket client and server, TCP, IPC and RPC,
   and a resource fetched once and revalidated on later runs.

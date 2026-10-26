@@ -187,10 +187,7 @@ bool isInside(const FilePath& path, const FilePath& directory)
 HotReloadLoop::Options hotReloadOptionsFor(const HotReloadTarget& target,
                                            const std::string& requiredSymbol)
 {
-    auto options = HotReloadLoop::Options {};
-    options.sources.directory = FilePath {target.sourceDirectory};
-    options.buildCommand = hotReloadBuildCommand(target);
-    options.modulePath = FilePath {target.library};
+    auto options = hotReloadOptions(target);
     options.requiredSymbol = requiredSymbol;
     return options;
 }
@@ -209,6 +206,15 @@ Files::SourceWatcher::Options
     return sources;
 }
 } // namespace
+
+HotReloadLoop::Options hotReloadOptions(const HotReloadTarget& target)
+{
+    auto options = HotReloadLoop::Options {};
+    options.sources.directory = FilePath {target.sourceDirectory};
+    options.buildCommand = hotReloadBuildCommand(target);
+    options.modulePath = FilePath {target.library};
+    return options;
+}
 
 BuildFailure buildFailureFrom(const Processes::ProcessResult& result)
 {
@@ -233,6 +239,7 @@ HotReloadLoop::HotReloadLoop(const Options& options)
     { buildFinished(result); };
     runner.onOutput = forwardOutput;
     runner.onFinished = finished;
+    library.validate = options.validate;
 }
 
 HotReloadLoop::HotReloadLoop(const HotReloadTarget& target,
