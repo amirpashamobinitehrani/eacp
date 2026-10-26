@@ -63,7 +63,7 @@ std::vector<float> referenceRMSNorm(const std::vector<float>& x,
         for (auto c = 0; c < dim; ++c)
             result[(std::size_t) r * dim + c] =
                 (float) ((double) x[(std::size_t) r * dim + c] * scale
-                        * (double) gamma[(std::size_t) c]);
+                         * (double) gamma[(std::size_t) c]);
     }
 
     return result;
@@ -135,9 +135,10 @@ std::vector<float> referenceDynamicTanh(const std::vector<float>& x,
 
     return result;
 }
-}
+} // namespace
 
-auto tRMSNormMatchesReferenceAtHeadDim = test("Norm/rmsNormMatchesReferenceHeadDim") = []
+auto tRMSNormMatchesReferenceAtHeadDim =
+    test("Norm/rmsNormMatchesReferenceHeadDim") = []
 {
     auto& device = Device::shared();
 
@@ -164,9 +165,8 @@ auto tRMSNormMatchesReferenceAtHeadDim = test("Norm/rmsNormMatchesReferenceHeadD
 
     commands.commit();
 
-    checkMatches(result->toHostF32(),
-                referenceRMSNorm(x, gamma, rows, dim, eps),
-                1.0e-4f);
+    checkMatches(
+        result->toHostF32(), referenceRMSNorm(x, gamma, rows, dim, eps), 1.0e-4f);
 };
 
 auto tRMSNormMatchesReferenceAtEmbedDim =
@@ -197,12 +197,12 @@ auto tRMSNormMatchesReferenceAtEmbedDim =
 
     commands.commit();
 
-    checkMatches(result->toHostF32(),
-                referenceRMSNorm(x, gamma, rows, dim, eps),
-                1.0e-4f);
+    checkMatches(
+        result->toHostF32(), referenceRMSNorm(x, gamma, rows, dim, eps), 1.0e-4f);
 };
 
-auto tLayerNormMatchesReferenceWithBias = test("Norm/layerNormMatchesReferenceWithBias") = []
+auto tLayerNormMatchesReferenceWithBias =
+    test("Norm/layerNormMatchesReferenceWithBias") = []
 {
     auto& device = Device::shared();
 
@@ -232,8 +232,8 @@ auto tLayerNormMatchesReferenceWithBias = test("Norm/layerNormMatchesReferenceWi
     commands.commit();
 
     checkMatches(result->toHostF32(),
-                referenceLayerNorm(x, gamma, &beta, rows, dim, eps),
-                1.0e-4f);
+                 referenceLayerNorm(x, gamma, &beta, rows, dim, eps),
+                 1.0e-4f);
 };
 
 auto tLayerNormMatchesReferenceWithoutBias =
@@ -265,8 +265,8 @@ auto tLayerNormMatchesReferenceWithoutBias =
     commands.commit();
 
     checkMatches(result->toHostF32(),
-                referenceLayerNorm(x, gamma, nullptr, rows, dim, eps),
-                1.0e-4f);
+                 referenceLayerNorm(x, gamma, nullptr, rows, dim, eps),
+                 1.0e-4f);
 };
 
 auto tDynamicTanhMatchesReference = test("Norm/dynamicTanhMatchesReference") = []
@@ -299,6 +299,6 @@ auto tDynamicTanhMatchesReference = test("Norm/dynamicTanhMatchesReference") = [
     commands.commit();
 
     checkMatches(result->toHostF32(),
-                referenceDynamicTanh(x, gamma, beta, rows, dim, alpha),
-                1.0e-5f);
+                 referenceDynamicTanh(x, gamma, beta, rows, dim, alpha),
+                 1.0e-5f);
 };

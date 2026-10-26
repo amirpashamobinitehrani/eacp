@@ -22,7 +22,7 @@ std::vector<float> scatteredValues(int count, int salt)
 
     return values;
 }
-}
+} // namespace
 
 auto tTensorRoundTripsF32 = test("Tensor/roundTripsF32") = []
 {

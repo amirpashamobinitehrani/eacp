@@ -100,8 +100,8 @@ private:
 };
 
 Tensor linear(GPU::ComputePass& pass,
-             const Tensor& input,
-             const Tensor& weight,
-             const Tensor* bias = nullptr,
-             GPU::Device& device = GPU::Device::shared());
-}
+              const Tensor& input,
+              const Tensor& weight,
+              const Tensor* bias = nullptr,
+              GPU::Device& device = GPU::Device::shared());
+} // namespace eacp::ML::Compute

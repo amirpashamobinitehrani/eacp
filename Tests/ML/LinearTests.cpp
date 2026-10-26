@@ -46,7 +46,7 @@ std::vector<float> referenceLinear(const std::vector<float>& x,
 
             for (auto k = 0; k < inner; ++k)
                 total += (double) x[(std::size_t) r * inner + k]
-                        * (double) w[(std::size_t) c * inner + k];
+                         * (double) w[(std::size_t) c * inner + k];
 
             result[(std::size_t) r * columns + c] = (float) total;
         }
@@ -84,7 +84,7 @@ Tensor runLinear(Device& device,
     commands.commit();
     return std::move(*result);
 }
-}
+} // namespace
 
 auto tLinearMatchesReferenceAtSmallShape = test("Linear/matchesReferenceSmall") = []
 {
@@ -105,11 +105,12 @@ auto tLinearMatchesReferenceAtSmallShape = test("Linear/matchesReferenceSmall") 
     auto result = runLinear(device, input, weight, nullptr);
 
     checkMatches(result.toHostF32(),
-                referenceLinear(x, w, nullptr, rows, inner, columns),
-                2.0e-4f * inner);
+                 referenceLinear(x, w, nullptr, rows, inner, columns),
+                 2.0e-4f * inner);
 };
 
-auto tLinearMatchesReferenceAtRaggedShape = test("Linear/matchesReferenceRagged") = []
+auto tLinearMatchesReferenceAtRaggedShape =
+    test("Linear/matchesReferenceRagged") = []
 {
     auto& device = Device::shared();
 
@@ -128,8 +129,8 @@ auto tLinearMatchesReferenceAtRaggedShape = test("Linear/matchesReferenceRagged"
     auto result = runLinear(device, input, weight, nullptr);
 
     checkMatches(result.toHostF32(),
-                referenceLinear(x, w, nullptr, rows, inner, columns),
-                2.0e-4f * inner);
+                 referenceLinear(x, w, nullptr, rows, inner, columns),
+                 2.0e-4f * inner);
 };
 
 // An inner dimension that is a multiple of four, so the four-wide reads are
@@ -180,11 +181,12 @@ auto tLinearMatchesReferenceWithBias = test("Linear/matchesReferenceWithBias") =
     auto result = runLinear(device, input, weight, &bias);
 
     checkMatches(result.toHostF32(),
-                referenceLinear(x, w, &b, rows, inner, columns),
-                2.0e-4f * inner);
+                 referenceLinear(x, w, &b, rows, inner, columns),
+                 2.0e-4f * inner);
 };
 
-auto tLinearMatchesReferenceAtModelShape = test("Linear/matchesReferenceAtModelShape") = []
+auto tLinearMatchesReferenceAtModelShape =
+    test("Linear/matchesReferenceAtModelShape") = []
 {
     auto& device = Device::shared();
 
@@ -203,8 +205,8 @@ auto tLinearMatchesReferenceAtModelShape = test("Linear/matchesReferenceAtModelS
     auto result = runLinear(device, input, weight, nullptr);
 
     checkMatches(result.toHostF32(),
-                referenceLinear(x, w, nullptr, rows, inner, columns),
-                2.0e-4f * inner);
+                 referenceLinear(x, w, nullptr, rows, inner, columns),
+                 2.0e-4f * inner);
 };
 
 auto tLinearPackedHalfWeightIsCloseToReference =
@@ -227,8 +229,8 @@ auto tLinearPackedHalfWeightIsCloseToReference =
     auto result = runLinear(device, input, weight, nullptr);
 
     checkMatches(result.toHostF32(),
-                referenceLinear(x, w, nullptr, rows, inner, columns),
-                5.0e-2f + 5.0e-3f * inner);
+                 referenceLinear(x, w, nullptr, rows, inner, columns),
+                 5.0e-2f + 5.0e-3f * inner);
 };
 
 namespace
@@ -266,7 +268,7 @@ std::vector<float> runLinearF32(Device& device,
     commands.commit();
     return result.toHostF32();
 }
-}
+} // namespace
 
 // Tiles 32 and 64 rows tall split the output differently among SIMD groups, but
 // every element is the same sequence of products, so the two agree to the bit.
@@ -292,8 +294,10 @@ auto tLinearTilingsGiveTheSameBits = test("Linear/tilingsGiveTheSameBits") = []
     auto short32 = runLinearF32(device, 32, input, weight);
 
     check(tall.size() == short32.size());
-    check(std::memcmp(tall.data(), short32.data(), tall.size() * sizeof(float)) == 0);
-    checkMatches(tall, referenceLinear(x, w, nullptr, rows, inner, columns), 1.0e-3f);
+    check(std::memcmp(tall.data(), short32.data(), tall.size() * sizeof(float))
+          == 0);
+    checkMatches(
+        tall, referenceLinear(x, w, nullptr, rows, inner, columns), 1.0e-3f);
 };
 
 namespace

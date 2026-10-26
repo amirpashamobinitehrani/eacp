@@ -113,10 +113,10 @@ private:
 };
 
 Tensor rmsNorm(GPU::ComputePass& pass,
-              const Tensor& input,
-              const Tensor& gamma,
-              float epsilon,
-              GPU::Device& device = GPU::Device::shared());
+               const Tensor& input,
+               const Tensor& gamma,
+               float epsilon,
+               GPU::Device& device = GPU::Device::shared());
 
 Tensor layerNorm(GPU::ComputePass& pass,
                  const Tensor& input,
@@ -153,4 +153,4 @@ Tensor dynamicTanhPerHead(GPU::ComputePass& pass,
                           float alpha,
                           int headDim,
                           GPU::Device& device = GPU::Device::shared());
-}
+} // namespace eacp::ML::Compute

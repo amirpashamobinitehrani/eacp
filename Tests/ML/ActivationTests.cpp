@@ -84,24 +84,16 @@ void checkActivation(ActivationKind kind, float tolerance)
         check(std::abs(values[(std::size_t) i] - expected) <= tolerance);
     }
 }
-}
+} // namespace
 
 auto tSiLUMatchesReference = test("Activation/siluMatchesReference") = []
-{
-    checkActivation(ActivationKind::SiLU, 1.0e-5f);
-};
+{ checkActivation(ActivationKind::SiLU, 1.0e-5f); };
 
 auto tGeluTanhMatchesReference = test("Activation/geluTanhMatchesReference") = []
-{
-    checkActivation(ActivationKind::GeluTanh, 1.0e-5f);
-};
+{ checkActivation(ActivationKind::GeluTanh, 1.0e-5f); };
 
 auto tGeluExactMatchesReference = test("Activation/geluExactMatchesReference") = []
-{
-    checkActivation(ActivationKind::GeluExact, 1.0e-5f);
-};
+{ checkActivation(ActivationKind::GeluExact, 1.0e-5f); };
 
 auto tSigmoidMatchesReference = test("Activation/sigmoidMatchesReference") = []
-{
-    checkActivation(ActivationKind::Sigmoid, 1.0e-5f);
-};
+{ checkActivation(ActivationKind::Sigmoid, 1.0e-5f); };

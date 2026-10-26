@@ -116,11 +116,11 @@ void LayerNormKernel::define()
     auto col = var(lane);
 
     loop(col.get() < dimension,
-        [&]
-        {
-            sum = sum.get() + input[base + col.get()];
-            col = col.get() + (unsigned) normGroupWidth;
-        });
+         [&]
+         {
+             sum = sum.get() + input[base + col.get()];
+             col = col.get() + (unsigned) normGroupWidth;
+         });
 
     auto mean = groupSum(sum.get()) / toFloat(dimension);
 
@@ -128,12 +128,12 @@ void LayerNormKernel::define()
     col = lane;
 
     loop(col.get() < dimension,
-        [&]
-        {
-            auto centred = input[base + col.get()] - mean;
-            sumSquaredDeviation = sumSquaredDeviation.get() + centred * centred;
-            col = col.get() + (unsigned) normGroupWidth;
-        });
+         [&]
+         {
+             auto centred = input[base + col.get()] - mean;
+             sumSquaredDeviation = sumSquaredDeviation.get() + centred * centred;
+             col = col.get() + (unsigned) normGroupWidth;
+         });
 
     auto variance = groupSum(sumSquaredDeviation.get()) / toFloat(dimension);
     auto scale = rsqrt(variance + epsilon);
@@ -141,16 +141,16 @@ void LayerNormKernel::define()
     col = lane;
 
     loop(col.get() < dimension,
-        [&]
-        {
-            auto centred = input[base + col.get()] - mean;
+         [&]
+         {
+             auto centred = input[base + col.get()] - mean;
 
-            write(output,
-                 base + col.get(),
-                 centred * scale * gamma[col.get()] + beta[col.get()]);
+             write(output,
+                   base + col.get(),
+                   centred * scale * gamma[col.get()] + beta[col.get()]);
 
-            col = col.get() + (unsigned) normGroupWidth;
-        });
+             col = col.get() + (unsigned) normGroupWidth;
+         });
 }
 
 LayerNormNoBiasKernel::LayerNormNoBiasKernel()
@@ -175,11 +175,11 @@ void LayerNormNoBiasKernel::define()
     auto col = var(lane);
 
     loop(col.get() < dimension,
-        [&]
-        {
-            sum = sum.get() + input[base + col.get()];
-            col = col.get() + (unsigned) normGroupWidth;
-        });
+         [&]
+         {
+             sum = sum.get() + input[base + col.get()];
+             col = col.get() + (unsigned) normGroupWidth;
+         });
 
     auto mean = groupSum(sum.get()) / toFloat(dimension);
 
@@ -187,12 +187,12 @@ void LayerNormNoBiasKernel::define()
     col = lane;
 
     loop(col.get() < dimension,
-        [&]
-        {
-            auto centred = input[base + col.get()] - mean;
-            sumSquaredDeviation = sumSquaredDeviation.get() + centred * centred;
-            col = col.get() + (unsigned) normGroupWidth;
-        });
+         [&]
+         {
+             auto centred = input[base + col.get()] - mean;
+             sumSquaredDeviation = sumSquaredDeviation.get() + centred * centred;
+             col = col.get() + (unsigned) normGroupWidth;
+         });
 
     auto variance = groupSum(sumSquaredDeviation.get()) / toFloat(dimension);
     auto scale = rsqrt(variance + epsilon);
@@ -200,12 +200,12 @@ void LayerNormNoBiasKernel::define()
     col = lane;
 
     loop(col.get() < dimension,
-        [&]
-        {
-            auto centred = input[base + col.get()] - mean;
-            write(output, base + col.get(), centred * scale * gamma[col.get()]);
-            col = col.get() + (unsigned) normGroupWidth;
-        });
+         [&]
+         {
+             auto centred = input[base + col.get()] - mean;
+             write(output, base + col.get(), centred * scale * gamma[col.get()]);
+             col = col.get() + (unsigned) normGroupWidth;
+         });
 }
 
 DynamicTanhKernel::DynamicTanhKernel()
@@ -240,10 +240,10 @@ void DynamicTanhKernel::define()
 }
 
 Tensor rmsNorm(ComputePass& pass,
-              const Tensor& input,
-              const Tensor& gamma,
-              float epsilon,
-              Device& device)
+               const Tensor& input,
+               const Tensor& gamma,
+               float epsilon,
+               Device& device)
 {
     auto rows = input.rows();
     auto dim = input.cols();
@@ -358,4 +358,4 @@ Tensor dynamicTanhPerHead(ComputePass& pass,
 
     return result;
 }
-}
+} // namespace eacp::ML::Compute

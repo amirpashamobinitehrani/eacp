@@ -42,8 +42,8 @@ Kernel& sharedKernel(GPU::Device& device, Args... args)
 
     auto& store = device.perDevice<Detail::KernelStore>();
     auto lock = std::scoped_lock {store.mutex};
-    auto& slot =
-        store.kernels[{std::type_index {typeid(Kernel)}, {static_cast<int>(args)...}}];
+    auto& slot = store.kernels[{std::type_index {typeid(Kernel)},
+                                {static_cast<int>(args)...}}];
 
     if (slot == nullptr)
     {

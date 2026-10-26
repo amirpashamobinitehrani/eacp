@@ -23,10 +23,10 @@ private:
 };
 
 Tensor swiGLU(GPU::ComputePass& pass,
-             const Tensor& input,
-             const Tensor& proj0Weight,
-             const Tensor& proj0Bias,
-             const Tensor& proj2Weight,
-             const Tensor& proj2Bias,
-             GPU::Device& device = GPU::Device::shared());
-}
+              const Tensor& input,
+              const Tensor& proj0Weight,
+              const Tensor& proj0Bias,
+              const Tensor& proj2Weight,
+              const Tensor& proj2Bias,
+              GPU::Device& device = GPU::Device::shared());
+} // namespace eacp::ML::Compute
