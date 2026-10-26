@@ -68,14 +68,14 @@ std::vector<float> referenceSwiGLU(const std::vector<float>& x,
 
             for (auto k = 0; k < inner; ++k)
                 value += (double) gated[(std::size_t) r * inner + k]
-                       * (double) w2[(std::size_t) c * inner + k];
+                         * (double) w2[(std::size_t) c * inner + k];
 
             result[(std::size_t) r * dim + c] = (float) value;
         }
 
     return result;
 }
-}
+} // namespace
 
 auto tSwiGLUMatchesReference = test("SwiGLU/matchesReference") = []
 {

@@ -24,7 +24,7 @@ int tileCount(int extent, int tile)
 {
     return (extent + tile - 1) / tile;
 }
-}
+} // namespace
 
 namespace
 {
@@ -377,9 +377,8 @@ void LinearPackedHalf::dispatch(ComputePass& pass, int rows, int columns, int in
     columnCount = (std::uint32_t) columns;
     innerCount = (std::uint32_t) inner;
 
-    pass.dispatch(*this,
-                  tileCount(columns, tileColumns) * threads,
-                  tileCount(rows, tileRows));
+    pass.dispatch(
+        *this, tileCount(columns, tileColumns) * threads, tileCount(rows, tileRows));
 }
 
 void LinearPackedHalf::define()
@@ -412,52 +411,54 @@ void LinearPackedHalf::define()
     auto k0 = var(0u);
 
     loop(k0.get() < innerCount,
-        [&]
-        {
-            for (auto i = 0u; i < 8u; ++i)
-            {
-                auto k = k0.get() + loadDepth + i;
-                auto inside = k < innerCount;
-                auto at = min(k, innerCount - 1u);
+         [&]
+         {
+             for (auto i = 0u; i < 8u; ++i)
+             {
+                 auto k = k0.get() + loadDepth + i;
+                 auto inside = k < innerCount;
+                 auto at = min(k, innerCount - 1u);
 
-                write(tile,
-                     loadRow * (unsigned) slab + loadDepth + i,
-                     select(inside, activations[aRow + at], 0.f));
+                 write(tile,
+                       loadRow * (unsigned) slab + loadDepth + i,
+                       select(inside, activations[aRow + at], 0.f));
 
-                write(tile,
-                     (unsigned) (tileRows * slab) + (loadDepth + i) * (unsigned) tileColumns
-                         + loadRow,
-                     select(inside, weight.readHalf(bRow + at), 0.f));
-            }
+                 write(tile,
+                       (unsigned) (tileRows * slab)
+                           + (loadDepth + i) * (unsigned) tileColumns + loadRow,
+                       select(inside, weight.readHalf(bRow + at), 0.f));
+             }
 
-            barrier();
+             barrier();
 
-            for (auto kk = 0u; kk < (unsigned) slab; kk += side)
-            {
-                SimdMatrix left[rowFragments];
-                SimdMatrix right[columnFragments];
+             for (auto kk = 0u; kk < (unsigned) slab; kk += side)
+             {
+                 SimdMatrix left[rowFragments];
+                 SimdMatrix right[columnFragments];
 
-                for (auto i = 0u; i < (unsigned) rowFragments; ++i)
-                    left[i] = simdMatrix(
-                        tile, (rowOffset + i * side) * (unsigned) slab + kk, slabStride);
+                 for (auto i = 0u; i < (unsigned) rowFragments; ++i)
+                     left[i] =
+                         simdMatrix(tile,
+                                    (rowOffset + i * side) * (unsigned) slab + kk,
+                                    slabStride);
 
-                for (auto j = 0u; j < (unsigned) columnFragments; ++j)
-                    right[j] = simdMatrix(
-                        tile,
-                        (unsigned) (tileRows * slab) + kk * (unsigned) tileColumns
-                            + columnOffset + j * side,
-                        columnStrideForStaging);
+                 for (auto j = 0u; j < (unsigned) columnFragments; ++j)
+                     right[j] = simdMatrix(tile,
+                                           (unsigned) (tileRows * slab)
+                                               + kk * (unsigned) tileColumns
+                                               + columnOffset + j * side,
+                                           columnStrideForStaging);
 
-                for (auto i = 0u; i < (unsigned) rowFragments; ++i)
-                    for (auto j = 0u; j < (unsigned) columnFragments; ++j)
-                        multiplyAccumulate(accumulators[i * columnFragments + j],
-                                          left[i],
-                                          right[j]);
-            }
+                 for (auto i = 0u; i < (unsigned) rowFragments; ++i)
+                     for (auto j = 0u; j < (unsigned) columnFragments; ++j)
+                         multiplyAccumulate(accumulators[i * columnFragments + j],
+                                            left[i],
+                                            right[j]);
+             }
 
-            barrier();
-            k0 += (unsigned) slab;
-        });
+             barrier();
+             k0 += (unsigned) slab;
+         });
 
     barrier();
 
@@ -466,10 +467,10 @@ void LinearPackedHalf::define()
     for (auto i = 0u; i < (unsigned) rowFragments; ++i)
         for (auto j = 0u; j < (unsigned) columnFragments; ++j)
             write(tile,
-                 (rowOffset + i * side) * (unsigned) tileColumns + columnOffset
-                     + j * side,
-                 columnStride,
-                 accumulators[i * columnFragments + j]);
+                  (rowOffset + i * side) * (unsigned) tileColumns + columnOffset
+                      + j * side,
+                  columnStride,
+                  accumulators[i * columnFragments + j]);
 
     barrier();
 
@@ -480,7 +481,7 @@ void LinearPackedHalf::define()
         auto n = n0 + index % (unsigned) tileColumns;
 
         ifThen(m < rowCount && n < columnCount,
-              [&] { write(output, m * columnCount + n, tile[index]); });
+               [&] { write(output, m * columnCount + n, tile[index]); });
     }
 }
 
@@ -504,10 +505,10 @@ void AddBiasRows::define()
 }
 
 Tensor linear(ComputePass& pass,
-             const Tensor& input,
-             const Tensor& weight,
-             const Tensor* bias,
-             Device& device)
+              const Tensor& input,
+              const Tensor& weight,
+              const Tensor* bias,
+              Device& device)
 {
     auto rows = input.rows();
     auto inner = input.cols();
@@ -535,4 +536,4 @@ Tensor linear(ComputePass& pass,
 
     return result;
 }
-}
+} // namespace eacp::ML::Compute

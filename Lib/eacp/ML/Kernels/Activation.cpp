@@ -17,7 +17,7 @@ Float sigmoidOf(const Float& x)
 constexpr auto geluTanhCoefficient = 0.7978845608028654f;
 constexpr auto geluCubicCoefficient = 0.044715f;
 constexpr auto inverseSqrtTwo = 0.7071067811865476f;
-}
+} // namespace
 
 ActivationKernel::ActivationKernel(ActivationKind kindToUse)
     : kind(kindToUse)
@@ -73,4 +73,4 @@ Tensor applyActivation(ComputePass& pass,
 
     return result;
 }
-}
+} // namespace eacp::ML::Compute

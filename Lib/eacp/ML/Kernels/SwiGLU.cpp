@@ -34,12 +34,12 @@ void SwiGLUGateKernel::define()
 }
 
 Tensor swiGLU(ComputePass& pass,
-             const Tensor& input,
-             const Tensor& proj0Weight,
-             const Tensor& proj0Bias,
-             const Tensor& proj2Weight,
-             const Tensor& proj2Bias,
-             Device& device)
+              const Tensor& input,
+              const Tensor& proj0Weight,
+              const Tensor& proj0Bias,
+              const Tensor& proj2Weight,
+              const Tensor& proj2Bias,
+              Device& device)
 {
     auto rows = input.rows();
     auto inner = proj0Weight.dim(0) / 2;
@@ -54,4 +54,4 @@ Tensor swiGLU(ComputePass& pass,
 
     return linear(pass, gated, proj2Weight, &proj2Bias, device);
 }
-}
+} // namespace eacp::ML::Compute

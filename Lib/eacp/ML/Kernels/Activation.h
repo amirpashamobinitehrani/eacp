@@ -35,4 +35,4 @@ Tensor applyActivation(GPU::ComputePass& pass,
                        const Tensor& input,
                        ActivationKind kind,
                        GPU::Device& device = GPU::Device::shared());
-}
+} // namespace eacp::ML::Compute
