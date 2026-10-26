@@ -25,14 +25,15 @@ if (NOT EACP_HAS_GPU)
 endif ()
 
 # The tensors, safetensors loader and compute kernels the Stable Audio models
-# run on, over eacp-gpu wherever it builds. Its Tensor and DType share the
-# eacp::ML namespace with eacp-ml-graph's, so no target links both.
+# run on, over eacp-gpu wherever it builds. They live in eacp::ML::Compute, so
+# their Tensor and DType stand beside eacp-ml-graph's.
 add_library(eacp-ml-kernels STATIC)
 
 target_link_libraries(eacp-ml-kernels PUBLIC eacp-gpu)
 
 target_sources(eacp-ml-kernels PRIVATE
         Tensor/Tensor.cpp
+        Tensor/StorageReuse.cpp
         Loader/SafetensorsFile.cpp
         Kernels/Linear.cpp
         Kernels/Norm.cpp

@@ -489,11 +489,34 @@ auto output = attendWithScores(pass, scores, value, heads, headDim);
 `scores` comes back holding the unnormalised probabilities; the output is
 `rows x heads x headDim`.
 
-The row stats write the probability and then add it to the sum, and they are
-written the way the C++ would be — `auto p = exp(scores[i] - peak);`, stored,
-then added. That `p` is one value, evaluated once before the store, is the
-EDSL's rule rather than this kernel's care: see "A handle is a value" in
-`Lib/eacp/GPU/README.md`.
+The row stats write the probability and then add it to the sum, and the
+probability is a `var()`: the EDSL prints an expression where it is used, so a
+plain `auto p = exp(scores[i] - peak);` added after the store would read
+`scores[i]` again - the probability, not the score - and add `exp` of it.
+
+### Reusing temporaries
+
+A fresh GPU buffer costs more than its allocation (Metal zeroes and wires its
+pages before the first command buffer using it runs), and a sampling step asks
+for the same temporaries every time round. A `StorageReuse` scope keeps the
+storage of `Tensor::uninitializedF32` when its tensor goes, and hands it to a
+later one of the same size once `recycle()` says the GPU is done:
+
+```cpp
+auto reuse = StorageReuse {device};
+
+for (auto step = 0; step < steps; ++step)
+{
+    auto commands = device.makeCommandBuffer();
+    // ... record the step ...
+    commands.commit();
+    StorageReuse::recycle(device);
+}
+```
+
+Storage given back while a command buffer is being recorded waits for the next
+`recycle()`, so it is never reused inside the command buffer that may still read
+it. Ending the scope frees everything it kept.
 
 ## Tests and examples
 

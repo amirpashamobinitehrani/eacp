@@ -1,5 +1,7 @@
 #include "Tensor.h"
 
+#include "StorageReuse.h"
+
 #include "../../GPU/Codegen/PackedVertex.h"
 
 #include <cassert>
@@ -94,11 +96,10 @@ Tensor Tensor::fromHostPackedF16(const float* data,
 
 Tensor Tensor::uninitializedF32(std::vector<int> shape, GPU::Device& device)
 {
-    auto count = elementCountOf(shape);
-    auto buffer = device.makeBuffer((std::int64_t) count * sizeof(float),
-                                    GPU::BufferUsage::Storage);
+    auto bytes = (std::int64_t) elementCountOf(shape) * (std::int64_t) sizeof(float);
 
-    return Tensor {std::move(buffer), std::move(shape), DType::F32};
+    return Tensor {
+        Detail::storageOf(bytes, device), 0, std::move(shape), DType::F32, device};
 }
 
 std::vector<float> Tensor::toHostF32() const

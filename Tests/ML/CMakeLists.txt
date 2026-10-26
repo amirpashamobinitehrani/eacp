@@ -28,6 +28,7 @@ if (TARGET eacp-ml-kernels)
                 NormTests.cpp
                 RoPETests.cpp
                 SafetensorsFileTests.cpp
+                StorageReuseTests.cpp
                 SwiGLUTests.cpp
                 TensorOpsTests.cpp
                 TensorTests.cpp
