@@ -45,6 +45,12 @@ struct SafetensorsEntry
 // of its own; F16 and BF16 are converted to F32 on the host. The caller writes
 // the same code either way.
 //
+// loadPackedF16 serves an F16 tensor the same way, since the file's halves are
+// already the packed layout - in place where it can be, copied as bytes where
+// not, converted never. loadLinearWeight is the call for a weight only linear()
+// reads: packed where the checkpoint stores it as F16, F32 otherwise, so one
+// loader takes an fp32 checkpoint and its fp16 conversion alike.
+//
 // Tensors loaded in place are the file's bytes: nothing may write through
 // them, which no weight is ever asked to take.
 class SafetensorsFile
@@ -66,15 +72,19 @@ public:
     Tensor loadPackedF16(const std::string& name,
                          GPU::Device& device = GPU::Device::shared()) const;
 
+    Tensor loadLinearWeight(const std::string& name,
+                            GPU::Device& device = GPU::Device::shared()) const;
+
     // A tensor's values on the host as F32, whatever it is stored as: for the
     // weights a loader transforms before they reach the GPU.
     std::vector<float> readF32(const std::string& name) const;
 
     float loadScalar(const std::string& name) const;
 
-    // How the F32 loads so far were served: in place, or copied because the
-    // device cannot adopt the mapping or the tensor's offset is off its grid;
-    // and how many were converted from F16 or BF16.
+    // How the loads so far were served: in place, or copied because the device
+    // cannot adopt the mapping or the tensor's offset is off its grid; and how
+    // many were converted, to F32 from F16 or BF16 or to packed F16 from
+    // anything but F16.
     struct LoadCounts
     {
         int inPlace = 0;
@@ -105,6 +115,7 @@ private:
     std::shared_ptr<const GPU::Buffer> bufferFor(Segment& segment,
                                                  GPU::Device& device) const;
     std::int64_t fileOffsetOf(const SafetensorsEntry& entry) const;
+    Tensor loadStoredF16(const SafetensorsEntry& entry, GPU::Device& device) const;
 
     std::shared_ptr<const MemoryMappedFile> mapped;
     std::uint64_t dataSectionStart = 0;

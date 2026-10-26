@@ -25,7 +25,7 @@ SafetensorsDType dtypeFromName(const std::string& name)
     return SafetensorsDType::Unknown;
 }
 
-int bytesPerElement(SafetensorsDType dtype)
+[[maybe_unused]] int bytesPerElement(SafetensorsDType dtype)
 {
     switch (dtype)
     {
@@ -64,8 +64,11 @@ SafetensorsFile::SafetensorsFile(
 {
     auto spans = std::vector<std::pair<std::int64_t, std::int64_t>> {};
 
+    // The tensors that can be loaded in place: F32, and F16 kept packed.
     for (const auto& [name, entry]: entries)
-        if (entry.dtype == SafetensorsDType::F32 && entry.byteLength > 0)
+        if ((entry.dtype == SafetensorsDType::F32
+             || entry.dtype == SafetensorsDType::F16)
+            && entry.byteLength > 0)
         {
             auto offset = fileOffsetOf(entry);
             spans.emplace_back(offset, offset + (std::int64_t) entry.byteLength);
@@ -295,6 +298,11 @@ Tensor SafetensorsFile::loadPackedF16(const std::string& name,
     auto entry = find(name);
     assert(entry != nullptr);
 
+    if (entry->dtype == SafetensorsDType::F16)
+        return loadStoredF16(*entry, device);
+
+    ++counts.converted;
+
     if (entry->dtype == SafetensorsDType::F32)
     {
         auto data = reinterpret_cast<const float*>(rawBytes(name));
@@ -303,6 +311,56 @@ Tensor SafetensorsFile::loadPackedF16(const std::string& name,
 
     auto values = readF32(name);
     return Tensor::fromHostPackedF16(values.data(), entry->shape, device);
+}
+
+Tensor SafetensorsFile::loadLinearWeight(const std::string& name,
+                                         GPU::Device& device) const
+{
+    auto entry = find(name);
+    assert(entry != nullptr);
+
+    if (entry->dtype == SafetensorsDType::F16)
+        return loadStoredF16(*entry, device);
+
+    return loadF32(name, device);
+}
+
+// An F16 tensor is already the packed layout - halves in order, two to a
+// little-endian word - so it is the file's bytes, in place or copied. A count
+// of halves that is odd leaves the last word half outside the tensor, which an
+// in-place range would read past, so that one is copied and padded.
+Tensor SafetensorsFile::loadStoredF16(const SafetensorsEntry& entry,
+                                      GPU::Device& device) const
+{
+    auto offset = fileOffsetOf(entry);
+    auto count = elementCountOf(entry.shape);
+    auto onGrid = offset % device.storageBufferOffsetAlignment() == 0;
+
+    if (onGrid && count % 2 == 0 && entry.byteLength > 0)
+    {
+        auto& segment = segmentHolding(offset);
+
+        if (auto buffer = bufferFor(segment, device))
+        {
+            ++counts.inPlace;
+            return Tensor {std::move(buffer),
+                           offset - segment.start,
+                           entry.shape,
+                           DType::F16Packed,
+                           device};
+        }
+    }
+
+    ++counts.copied;
+    auto words = std::vector<std::uint32_t>((std::size_t) (count + 1) / 2, 0u);
+    std::memcpy(words.data(), mapped->bytes().data() + offset, entry.byteLength);
+
+    auto buffer =
+        device.makeBuffer(words.data(),
+                          (std::int64_t) (words.size() * sizeof(std::uint32_t)),
+                          GPU::BufferUsage::Storage);
+
+    return Tensor {std::move(buffer), entry.shape, DType::F16Packed};
 }
 
 float SafetensorsFile::loadScalar(const std::string& name) const

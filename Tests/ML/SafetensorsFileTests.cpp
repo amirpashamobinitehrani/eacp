@@ -237,3 +237,93 @@ auto tSafetensorsTensorsOutliveTheFile =
     check(aligned->toHostF32() == vectorOf(alignedValues));
     check(doubled->toHostF32() == expected);
 };
+
+namespace
+{
+constexpr auto halfValues = std::array {0.5f, -1.25f, 3.f, -0.375f, 2.f, 1.f};
+constexpr auto oddHalfValues = std::array {0.25f, -4.f, 8.5f};
+constexpr auto floatValues = std::array {1.f, 2.f, -3.f, 4.5f, 5.f, -6.f};
+
+void writeHalves(std::ofstream& file, const float* values, std::size_t count)
+{
+    for (auto i = std::size_t {}; i < count; ++i)
+    {
+        auto bits = halfFromFloat(values[i]);
+        writeBytes(file, &bits, sizeof(bits));
+    }
+}
+
+// An F16 matrix on the grid with an even count, an F16 vector with an odd one,
+// and an F32 matrix: what an fp16 conversion of a checkpoint holds.
+std::filesystem::path writeHalfFile(const std::string& name)
+{
+    auto header = std::string {
+        "{\"half\":{\"dtype\":\"F16\",\"shape\":[2,3],\"data_offsets\":[0,12]},"
+        "\"oddHalf\":{\"dtype\":\"F16\",\"shape\":[3],\"data_offsets\":[12,18]},"
+        "\"pad\":{\"dtype\":\"F16\",\"shape\":[1],\"data_offsets\":[18,20]},"
+        "\"float\":{\"dtype\":\"F32\",\"shape\":[2,3],\"data_offsets\":[20,44]}}"};
+
+    while ((8 + header.size()) % 8 != 0)
+        header += ' ';
+
+    auto path = std::filesystem::temp_directory_path()
+                / ("eacp-ml-safetensors-half-" + name + ".safetensors");
+    auto file = std::ofstream {path, std::ios::binary};
+
+    auto headerLength = (std::uint64_t) header.size();
+    writeBytes(file, &headerLength, sizeof(headerLength));
+    writeBytes(file, header.data(), header.size());
+    writeHalves(file, halfValues.data(), halfValues.size());
+    writeHalves(file, oddHalfValues.data(), oddHalfValues.size());
+
+    auto pad = std::uint16_t {};
+    writeBytes(file, &pad, sizeof(pad));
+    writeBytes(file, floatValues.data(), sizeof(floatValues));
+
+    return path;
+}
+} // namespace
+
+// The file's halves are already the packed layout, so an F16 tensor is loaded
+// as its bytes - in place where the device adopts the mapping - and never
+// converted; and loadLinearWeight takes each tensor as the checkpoint stores it.
+auto tSafetensorsLoadsF16AsStored =
+    test("SafetensorsFile/loadsF16AsItsBytesAndLinearWeightsAsStored") = []
+{
+    auto& device = Device::shared();
+
+    if (!device.isValid())
+        return;
+
+    auto path = writeHalfFile("stored");
+    auto file = SafetensorsFile::open(path.string());
+    check(file.has_value());
+
+    auto half = file->loadPackedF16("half", device);
+    auto oddHalf = file->loadPackedF16("oddHalf", device);
+
+    check(half.isPacked() && oddHalf.isPacked());
+    check(half.toHostF32() == vectorOf(halfValues));
+    check(oddHalf.toHostF32() == vectorOf(oddHalfValues));
+
+    auto counts = file->loadCounts();
+    auto adopts = Buffer::canAdoptMemory(device);
+
+    check(counts.inPlace == (adopts ? 1 : 0));
+    check(counts.copied == (adopts ? 1 : 2));
+    check(counts.converted == 0);
+
+    auto asStoredHalf = file->loadLinearWeight("half", device);
+    auto asStoredFloat = file->loadLinearWeight("float", device);
+
+    check(asStoredHalf.isPacked());
+    check(!asStoredFloat.isPacked());
+    check(asStoredFloat.toHostF32() == vectorOf(floatValues));
+
+    auto narrowed = file->loadPackedF16("float", device);
+    check(narrowed.isPacked());
+    check(narrowed.toHostF32() == vectorOf(floatValues));
+    check(file->loadCounts().converted == 1);
+
+    std::filesystem::remove(path);
+};
