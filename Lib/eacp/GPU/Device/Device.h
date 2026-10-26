@@ -13,8 +13,11 @@
 #include <eacp/Core/Threads/ThreadUtils.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <typeindex>
 
 namespace eacp::Graphics
 {
@@ -464,6 +467,24 @@ public:
     // real storage.
     void noteBufferCreated();
 
+    // This Device's own T: one, made on first use and destroyed with the
+    // Device, before the backend device itself. For state that is only valid
+    // on this Device - prepared kernels, say - and must neither outlive it nor
+    // be found again by a later Device at the same address, which a static
+    // keyed by the Device's address would do. The lookup is safe from any
+    // thread; what T does with that is T's own business.
+    template <typename T>
+    T& perDevice()
+    {
+        auto lock = std::scoped_lock {perDeviceMutex};
+        auto& slot = perDeviceObjects[std::type_index {typeid(T)}];
+
+        if (slot == nullptr)
+            slot = std::make_shared<T>();
+
+        return *static_cast<T*>(slot.get());
+    }
+
 private:
     // Makes this Device follow the main thread rather than the one that
     // constructed it. Private because Device::shared() is the only caller and
@@ -494,5 +515,9 @@ private:
 
     Frame* openFrame = nullptr;
     int openFrames = 0;
+
+    // Declared after impl, so destroyed before the backend device.
+    std::mutex perDeviceMutex;
+    std::map<std::type_index, std::shared_ptr<void>> perDeviceObjects;
 };
 } // namespace eacp::GPU

@@ -18,6 +18,22 @@ endif ()
 # encoder at its real sizes.
 eacp_force_optimization(MLGraphTests)
 
+if (TARGET eacp-ml-kernels)
+    nano_add_executable(MLKernelTests
+            SOURCES
+                ActivationTests.cpp
+                AttentionTests.cpp
+                BandedAttentionTests.cpp
+                LinearTests.cpp
+                NormTests.cpp
+                RoPETests.cpp
+                SafetensorsFileTests.cpp
+                SwiGLUTests.cpp
+                TensorOpsTests.cpp
+                TensorTests.cpp
+            TARGETS eacp-ml-kernels)
+endif ()
+
 if (NOT EACP_HAS_COREML)
     return ()
 endif ()
