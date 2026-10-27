@@ -1,5 +1,4 @@
 #include "CrashChannel-macOS.h"
-#include "CrashClient-macOS.h"
 #include "CrashReportingPlatform.h"
 #include "MachImages-macOS.h"
 #include "UncaughtExceptions-macOS.h"
@@ -89,6 +88,13 @@ std::string_view findCaughtSignalName(int signalNumber)
     return "SIGNAL";
 }
 
+std::uint64_t getCurrentThreadId()
+{
+    auto threadId = std::uint64_t {0};
+    ::pthread_threadid_np(nullptr, &threadId);
+    return threadId;
+}
+
 std::uint64_t getInterruptedProgramCounter(const ucontext_t& context)
 {
 #if defined(__arm64__)
@@ -131,11 +137,11 @@ void recordSignal(SharedCrashInfo& crash,
     crash.frameCount = static_cast<std::uint32_t>(count + 1);
 }
 
-bool notifyHandlerProcess(const MacCrashClient& client, char notification)
+bool notifyHandlerProcess(const MacCrashClient& client)
 {
     while (true)
     {
-        auto written = ::write(client.crashPipeWriteEnd, &notification, 1);
+        auto written = ::write(client.crashPipeWriteEnd, &crashNotificationByte, 1);
 
         if (written == 1)
             return true;
@@ -180,7 +186,7 @@ void handleCrashSignal(int signalNumber, siginfo_t* info, void* context)
     recordSignal(state.crash, signalNumber, *info, userContext);
     state.tableSequence.fetch_add(2, std::memory_order_release);
 
-    if (notifyHandlerProcess(client, crashNotificationByte))
+    if (notifyHandlerProcess(client))
         waitForHandlerToEndProcess();
 
     restoreDefaultAndRaise(signalNumber);
@@ -475,16 +481,6 @@ void recordCrashMessage(std::string_view reason,
     appendBoundedText(crash.message, length, detail);
 }
 
-bool notifyHandlerOfHang()
-{
-    auto& client = getMacCrashClient();
-
-    if (client.crashPipeWriteEnd < 0 || client.isCrashing.load())
-        return false;
-
-    return notifyHandlerProcess(client, hangNotificationByte);
-}
-
 void installCrashHandlers(SharedState& state)
 {
     auto& client = getMacCrashClient();
@@ -613,13 +609,6 @@ std::string getOperatingSystemVersion()
 std::uint64_t getCurrentProcessId()
 {
     return static_cast<std::uint64_t>(::getpid());
-}
-
-std::uint64_t getCurrentThreadId()
-{
-    auto threadId = std::uint64_t {0};
-    ::pthread_threadid_np(nullptr, &threadId);
-    return threadId;
 }
 
 } // namespace eacp::CrashReporting::Detail

@@ -21,7 +21,6 @@ constexpr auto signalTrampolineSymbol = std::string_view {"_sigtramp"};
 enum class CrashPipeEvent
 {
     crash,
-    hang,
     appExited
 };
 
@@ -38,9 +37,6 @@ CrashPipeEvent waitForCrashPipeEvent()
 
         if (count == 1 && byte == crashNotificationByte)
             return CrashPipeEvent::crash;
-
-        if (count == 1 && byte == hangNotificationByte)
-            return CrashPipeEvent::hang;
 
         return CrashPipeEvent::appExited;
     }
@@ -163,41 +159,22 @@ void dropSignalHandlerFrames(Vector<StackFrame>& frames)
         frames.erase(frames.begin() + 1, trampoline + 1);
 }
 
-// The modules are the crash record's, which the app keeps current as images
-// load, so they serve a hang's addresses as well.
-Vector<StackFrame>
-    resolveFrames(const SharedCrashInfo& crash,
-                  const std::array<std::uint64_t, maxCrashFrames>& addresses,
-                  std::uint32_t frameCount)
+Vector<StackFrame> resolveCrashFrames(const SharedCrashInfo& crash)
 {
     auto handlerBases = getHandlerImageBases();
-    auto count = std::min(static_cast<std::size_t>(frameCount), maxCrashFrames);
+    auto count =
+        std::min(static_cast<std::size_t>(crash.frameCount), maxCrashFrames);
     auto frames = Vector<StackFrame> {};
 
     for (auto index = std::size_t {0}; index < count; ++index)
     {
         auto isReturnAddress = index > 0;
-        frames.add(
-            makeStackFrame(crash, handlerBases, addresses[index], isReturnAddress));
+        frames.add(makeStackFrame(
+            crash, handlerBases, crash.frames[index], isReturnAddress));
     }
 
-    return frames;
-}
-
-Vector<StackFrame> resolveCrashFrames(const SharedCrashInfo& crash)
-{
-    auto frames = resolveFrames(crash, crash.frames, crash.frameCount);
     dropSignalHandlerFrames(frames);
     return frames;
-}
-
-void handleHang(const ReportDatabase& database, const SharedState& state)
-{
-    auto report = beginHangReport(database, state);
-    report.crashingThread.frames =
-        resolveFrames(state.crash, state.hang.frames, state.hang.frameCount);
-    finishHandlerReport(database, report, state);
-    deliverReportInHandler(report);
 }
 
 int handleCrash(const ReportDatabase& database, const SharedState& state)
@@ -224,20 +201,11 @@ int runHandlerProcess(const HandlerArguments& arguments)
         return EXIT_FAILURE;
 
     signalHandlerReady();
-    auto database = ReportDatabase {arguments.databaseDirectory};
 
-    while (true)
-    {
-        auto event = waitForCrashPipeEvent();
+    if (waitForCrashPipeEvent() == CrashPipeEvent::appExited)
+        return EXIT_SUCCESS;
 
-        if (event == CrashPipeEvent::appExited)
-            return EXIT_SUCCESS;
-
-        if (event == CrashPipeEvent::crash)
-            return handleCrash(database, *state);
-
-        handleHang(database, *state);
-    }
+    return handleCrash(ReportDatabase {arguments.databaseDirectory}, *state);
 }
 
 } // namespace eacp::CrashReporting::Detail

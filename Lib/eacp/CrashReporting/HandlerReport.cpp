@@ -52,54 +52,24 @@ bool finishHandlerReport(const ReportDatabase& database,
     report.attachments =
         database.copyAttachments(report.id, readSharedAttachments(state));
 
-    if (report.kind == ReportKind::crash)
-        database.markCrashedLastRun();
-
+    database.markCrashedLastRun();
     return database.writeReport(report);
-}
-
-CrashReport beginHangReport(const ReportDatabase& database, const SharedState& state)
-{
-    constexpr auto millisecondsPerSecond = std::uint64_t {1000};
-    constexpr auto millisecondsPerTenth = std::uint64_t {100};
-    auto report = beginHandlerReport(database, state, CaptureSource::handler);
-    auto duration = state.hang.durationMilliseconds;
-    auto seconds =
-        std::to_string(duration / millisecondsPerSecond) + "."
-        + std::to_string(duration % millisecondsPerSecond / millisecondsPerTenth);
-
-    report.kind = ReportKind::hang;
-    report.reason = hangReason;
-    report.message = "main thread unresponsive for " + seconds + " s";
-    report.faultAddress = 0;
-    report.crashingThread.threadId = state.hang.mainThreadId;
-    report.hangDurationMilliseconds =
-        static_cast<std::int64_t>(state.hang.durationMilliseconds);
-
-    return report;
 }
 
 int deliverReportInHandler(const CrashReport& report)
 {
     try
     {
-        auto handler = createRegisteredCrashHandler();
-
-        if (report.kind == ReportKind::hang)
-            handler->hangReported(report);
-        else
-            handler->crashReported(report);
-
+        createRegisteredCrashHandler()->crashReported(report);
         return 0;
     }
     catch (const std::exception& error)
     {
-        Console::printError(std::string {"the crash handler threw: "}
-                            + error.what());
+        Console::printError(std::string {"crashReported threw: "} + error.what());
     }
     catch (...)
     {
-        Console::printError("the crash handler threw");
+        Console::printError("crashReported threw");
     }
 
     return 1;

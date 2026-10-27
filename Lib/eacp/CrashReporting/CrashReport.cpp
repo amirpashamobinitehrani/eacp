@@ -27,17 +27,6 @@ constexpr auto captureSourceNames = std::to_array<CaptureSourceName>({
     {CaptureSource::incomplete, "incomplete"},
 });
 
-struct ReportKindName
-{
-    ReportKind kind;
-    std::string_view name;
-};
-
-constexpr auto reportKindNames = std::to_array<ReportKindName>({
-    {ReportKind::crash, "crash"},
-    {ReportKind::hang, "hang"},
-});
-
 struct LevelName
 {
     Level level;
@@ -93,13 +82,11 @@ struct CrashedThreadRecord
 struct CrashReportRecord
 {
     std::string id;
-    std::string kind;
     std::int64_t timestamp = 0;
     std::string reason;
     std::string message;
     std::string faultAddress;
     CrashedThreadRecord crashingThread;
-    std::int64_t hangDuration = 0;
     std::string minidumpPath;
     std::map<std::string, std::string> metadata;
     std::map<std::string, std::string> tags;
@@ -111,13 +98,11 @@ struct CrashReportRecord
     std::string capturedBy;
 
     MIRO_REFLECT(id,
-                 kind,
                  timestamp,
                  reason,
                  message,
                  faultAddress,
                  crashingThread,
-                 hangDuration,
                  minidumpPath,
                  metadata,
                  tags,
@@ -151,8 +136,6 @@ CrashReportRecord makeCrashReportRecord(const CrashReport& report)
 {
     auto record = CrashReportRecord {};
     record.id = report.id;
-    record.kind = std::string {getReportKindName(report.kind)};
-    record.hangDuration = report.hangDurationMilliseconds;
     record.timestamp = report.timestamp;
     record.reason = report.reason;
     record.message = report.message;
@@ -188,8 +171,6 @@ CrashReport makeCrashReport(const CrashReportRecord& record)
 {
     auto report = CrashReport {};
     report.id = record.id;
-    report.kind = findReportKind(record.kind).value_or(ReportKind::crash);
-    report.hangDurationMilliseconds = record.hangDuration;
     report.timestamp = record.timestamp;
     report.reason = record.reason;
     report.message = record.message;
@@ -237,24 +218,6 @@ std::optional<Level> findLevel(std::string_view name)
     for (const auto& entry: levelNames)
         if (entry.name == name)
             return entry.level;
-
-    return std::nullopt;
-}
-
-std::string_view getReportKindName(ReportKind kind)
-{
-    for (const auto& entry: reportKindNames)
-        if (entry.kind == kind)
-            return entry.name;
-
-    return {};
-}
-
-std::optional<ReportKind> findReportKind(std::string_view name)
-{
-    for (const auto& entry: reportKindNames)
-        if (entry.name == name)
-            return entry.kind;
 
     return std::nullopt;
 }

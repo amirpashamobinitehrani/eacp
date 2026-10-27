@@ -16,6 +16,5 @@ constexpr auto firstFreeDescriptor = handlerReadyPipeDescriptor + 1;
 constexpr auto handlerDescriptorChannel = "inherited-descriptors";
 
 constexpr auto crashNotificationByte = char {'C'};
-constexpr auto hangNotificationByte = char {'H'};
 constexpr auto handlerReadyByte = char {'R'};
 } // namespace eacp::CrashReporting::Detail
